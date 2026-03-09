@@ -534,6 +534,7 @@ impl eframe::App for MyApp {
                         && last_eval.as_ref() != last_msg.as_ref();
                     if should_run {
                         let message = last_msg.clone().unwrap_or_default();
+                        println!("[Evaluator] Analyzing last message ({} chars), sending to Ollama...", message.len());
                         self.last_evaluated_message_by_evaluator.lock().unwrap().insert(eval_id, message.clone());
                         let eval_clone = evaluator.clone();
                         let endpoint = self.http_endpoint.clone();
@@ -555,12 +556,16 @@ impl eframe::App for MyApp {
                                     } else {
                                         "unknown"
                                     };
-                                    let _ = crate::http_client::send_evaluator_result(
+                                    if let Err(e) = crate::http_client::send_evaluator_result(
                                         &endpoint,
                                         "Agent Evaluator",
                                         sentiment,
                                         &response,
-                                    ).await;
+                                    ).await {
+                                        eprintln!("[Evaluator] Failed to send to web-chat: {}", e);
+                                    } else {
+                                        println!("[Evaluator] Sent to web-chat: {} -> {}", sentiment, &response[..response.len().min(60)]);
+                                    }
                                 }
                                 Err(e) => eprintln!("Ollama error: {}", e),
                             }
