@@ -67,6 +67,7 @@ pub async fn start_conversation_loop(
     topic: String,
     endpoint: String,
     active_flag: Arc<Mutex<bool>>,
+    last_message_in_chat: Arc<Mutex<Option<String>>>,
 ) {
     let mut turn = 0;
     let mut is_agent_a_turn = true;
@@ -161,11 +162,10 @@ pub async fn start_conversation_loop(
             Ok(response) => {
                 // Add to history
                 history.add_message(sender_id, sender_name.clone(), response.clone(), turn);
-                
+                *last_message_in_chat.lock().unwrap() = Some(response.clone());
                 // Print formatted message
                 println!("\n[{}]: {}", sender_name, response);
                 println!();
-                
                 // Send via HTTP (non-blocking, log errors but continue)
                 let endpoint_clone = endpoint.clone();
                 let topic_clone = topic.clone();

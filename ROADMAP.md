@@ -1,7 +1,13 @@
 # web-agents Project Roadmap
 
-## Objectives
+## Ongoing
+
+- [ ] Create steps and % for Agent Evaluator
+- [ ] Create Agent References to generate data (using web search?)
+- [ ] 
+
+## Completed
 
 - [x] Produce a UI (rows) for each agent with configs
-- [ ] Add communication to web-chat
-
+- [x] Cross platform egui template with Rust-ADK
+- [x] Add endpoint communication to web-chat

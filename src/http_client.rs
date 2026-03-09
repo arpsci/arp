@@ -53,3 +53,38 @@ pub async fn send_conversation_message(
     
     Ok(())
 }
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct EvaluatorResult {
+    pub evaluator_name: String,
+    pub sentiment: String,
+    pub message: String,
+    pub timestamp: String,
+}
+
+pub async fn send_evaluator_result(
+    endpoint: &str,
+    evaluator_name: &str,
+    sentiment: &str,
+    message: &str,
+) -> Result<(), anyhow::Error> {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let timestamp_str = chrono::DateTime::<chrono::Utc>::from_timestamp(timestamp as i64, 0)
+        .unwrap()
+        .to_rfc3339();
+    let payload = EvaluatorResult {
+        evaluator_name: evaluator_name.to_string(),
+        sentiment: sentiment.to_string(),
+        message: message.to_string(),
+        timestamp: timestamp_str,
+    };
+    let client = reqwest::Client::new();
+    let response = client.post(endpoint).json(&payload).send().await?;
+    if !response.status().is_success() {
+        eprintln!("HTTP evaluator request failed: {}", response.status());
+    }
+    Ok(())
+}

@@ -19,11 +19,25 @@ struct Agent {
     conversation_active: bool,
 }
 
+#[derive(Clone)]
+struct Evaluator {
+    id: usize,
+    name: String,
+    instruction: String,
+    limit_token: bool,
+    num_predict: String,
+    active: bool,
+}
+
 pub struct MyApp {
     rt_handle: Handle,
     agents: Vec<Agent>,
     next_agent_id: usize,
+    evaluators: Vec<Evaluator>,
+    next_evaluator_id: usize,
     http_endpoint: String,
+    last_message_in_chat: Arc<Mutex<Option<String>>>,
+    last_evaluated_message_by_evaluator: Arc<Mutex<std::collections::HashMap<usize, String>>>,
     conversation_loop_handles: Vec<(usize, Arc<Mutex<bool>>, tokio::task::JoinHandle<()>)>, // (agent_id, active_flag, handle)
 }
 
@@ -33,8 +47,12 @@ impl MyApp {
             rt_handle,
             agents: Vec::new(),
             next_agent_id: 1,
+            evaluators: Vec::new(),
+            next_evaluator_id: 1,
             http_endpoint: std::env::var("CONVERSATION_HTTP_ENDPOINT")
                 .unwrap_or_else(|_| "http://localhost:3000/".to_string()),
+            last_message_in_chat: Arc::new(Mutex::new(None)),
+            last_evaluated_message_by_evaluator: Arc::new(Mutex::new(std::collections::HashMap::new())),
             conversation_loop_handles: Vec::new(),
         }
     }
@@ -87,46 +105,6 @@ impl eframe::App for MyApp {
                                         ctx.request_repaint();
                                     });
                                 }
-
-                                ui.separator();
-
-                                if ui.button("Create Agent Worker").clicked() {
-                                    // Find the lowest available ID
-                                    let used_ids: std::collections::HashSet<usize> = 
-                                        self.agents.iter().map(|a| a.id).collect();
-                                    let mut new_id = 1;
-                                    while used_ids.contains(&new_id) {
-                                        new_id += 1;
-                                    }
-                                    
-                                    self.agents.push(Agent {
-                                        id: new_id,
-                                        name: format!("Agent {}", new_id),
-                                        selected: false,
-                                        instruction: "You are an assistant".to_string(),
-                                        input: String::new(),
-                                        limit_token: false,
-                                        num_predict: String::new(),
-                                        in_conversation: false,
-                                        conversation_topic: String::new(),
-                                        conversation_partner_id: None,
-                                        loop_chat: false,
-                                        conversation_active: false,
-                                    });
-                                    
-                                    // Update next_agent_id to be at least one more than the highest used ID
-                                    if new_id >= self.next_agent_id {
-                                        self.next_agent_id = new_id + 1;
-                                    }
-                                }
-
-                                ui.separator();
-
-                                if ui.button("Create Agent Evaluator").clicked() {
-                                    // Find the lowest available ID
-                                    println!("Creating Agent Manager");
-                                    
-                                }
                             });
                         });
                     });
@@ -143,8 +121,13 @@ impl eframe::App for MyApp {
                         ui.set_width(available_width);
                         egui::ScrollArea::vertical().show(ui, |ui| {
                         
-                // Collect IDs of agents to remove
+                // Collect IDs of agents and evaluators to remove
                 let mut agents_to_remove = Vec::new();
+                let mut evaluators_to_remove = Vec::new();
+                
+                let evaluator_names: Vec<(usize, String)> = self.evaluators.iter()
+                    .map(|e| (e.id, e.name.clone()))
+                    .collect();
                 
                 // Collect agent info for partner dropdown (before mutable borrow)
                 let agent_names: Vec<(usize, String)> = self.agents.iter()
@@ -166,19 +149,61 @@ impl eframe::App for MyApp {
                     .outer_margin(egui::Margin::same(0.0));
                 
                 manager_frame.show(ui, |ui| {
-                    ui.vertical(|ui| {
-                        ui.spacing_mut().item_spacing = egui::Vec2::new(5.0, 2.0);
-                        
-                        // Agent Manager label
-                        ui.horizontal(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
                             ui.label(egui::RichText::new("Agent Manager").strong().size(14.0));
-                            
                         });
-
                         ui.separator();
-                        
-                        // Sub-rows for each agent with buttons
-                        for (agent_id, agent_name) in &agent_names {
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing = egui::Vec2::new(5.0, 2.0);
+                            ui.horizontal(|ui| {
+                                if ui.button("Create Worker").clicked() {
+                                let used_ids: std::collections::HashSet<usize> =
+                                    self.agents.iter().map(|a| a.id).collect();
+                                let mut new_id = 1;
+                                while used_ids.contains(&new_id) {
+                                    new_id += 1;
+                                }
+                                self.agents.push(Agent {
+                                    id: new_id,
+                                    name: format!("Agent {}", new_id),
+                                    selected: false,
+                                    instruction: "You are an assistant".to_string(),
+                                    input: String::new(),
+                                    limit_token: false,
+                                    num_predict: String::new(),
+                                    in_conversation: false,
+                                    conversation_topic: String::new(),
+                                    conversation_partner_id: None,
+                                    loop_chat: false,
+                                    conversation_active: false,
+                                });
+                                if new_id >= self.next_agent_id {
+                                    self.next_agent_id = new_id + 1;
+                                }
+                            }
+                                if ui.button("Create Evaluator").clicked() {
+                                    let used_ids: std::collections::HashSet<usize> =
+                                        self.evaluators.iter().map(|e| e.id).collect();
+                                    let mut new_id = 1;
+                                    while used_ids.contains(&new_id) {
+                                        new_id += 1;
+                                    }
+                                    self.evaluators.push(Evaluator {
+                                        id: new_id,
+                                        name: format!("Evaluator {}", new_id),
+                                        instruction: "Answer with only one word: happy or sad. Evaluate the sentiment of this message.".to_string(),
+                                        limit_token: false,
+                                        num_predict: String::new(),
+                                        active: false,
+                                    });
+                                    if new_id >= self.next_evaluator_id {
+                                        self.next_evaluator_id = new_id + 1;
+                                    }
+                                }
+                            });
+                            ui.separator();
+                            for (agent_id, agent_name) in &agent_names {
                             ui.horizontal(|ui| {
                                 // Status and Erase Agent buttons on the left
                                 if ui.button("Status").clicked() {
@@ -210,6 +235,23 @@ impl eframe::App for MyApp {
                                 ui.label(agent_name);
                             });
                         }
+                            for (eval_id, eval_name) in &evaluator_names {
+                                ui.horizontal(|ui| {
+                                    if ui.button("Status").clicked() {
+                                        if let Some(e) = self.evaluators.iter().find(|x| x.id == *eval_id) {
+                                            println!("=== Evaluator {} Status ===", e.id);
+                                            println!("Name: {}", e.name);
+                                            println!("Instruction: {}", e.instruction);
+                                            println!("========================");
+                                        }
+                                    }
+                                    if ui.button("Erase").clicked() {
+                                        evaluators_to_remove.push(*eval_id);
+                                    }
+                                    ui.label(eval_name);
+                                });
+                            }
+                        });
                     });
                 });
                 
@@ -232,17 +274,20 @@ impl eframe::App for MyApp {
                         .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(255, 192, 203))) // Pink border
                         .rounding(4.0) // 4px border radius
                         .inner_margin(egui::Margin::same(5.0))
-                        .outer_margin(egui::Margin::same(0.0));
+                        .outer_margin(egui::Margin { left: 20.0, right: 0.0, top: 0.0, bottom: 0.0 });
                     
-                    let _frame_response = frame.show(ui, |ui| {
-                        // Agent Manager label
-                        ui.label(egui::RichText::new("Agent Worker").strong().size(14.0));
-                        ui.separator();
-
-                        ui.horizontal(|ui| {
-                            
-                            // Left section (50% width) - existing widgets
-                            ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.set_max_width(ui.available_width() * 0.8);
+                        let _frame_response = frame.show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.vertical(|ui| {
+                                    ui.label(egui::RichText::new("Agent Worker").strong().size(14.0));
+                                });
+                                ui.separator();
+                                ui.vertical(|ui| {
+                                    ui.horizontal(|ui| {
+                                        // Left section (50% width) - existing widgets
+                                        ui.vertical(|ui| {
                                 ui.set_width(ui.available_width() * 0.5);
                                 ui.spacing_mut().item_spacing = egui::Vec2::new(5.0, 2.0);
 
@@ -250,7 +295,7 @@ impl eframe::App for MyApp {
                                 
                                 // Agent Name row
                                 ui.horizontal(|ui| {
-                                    ui.label("Agent Name:");
+                                    ui.label("Name:");
                                     ui.add(egui::TextEdit::singleline(&mut agent.name));
                                         //.desired_width(100.0));
                                 });
@@ -341,37 +386,33 @@ impl eframe::App for MyApp {
                                                     agent.conversation_active = true;
                                                     agent.in_conversation = true;
                                                     
-                                                    // If loop chat is enabled, start the loop
-                                                    if agent.loop_chat {
-                                                        let active_flag = Arc::new(Mutex::new(true));
-                                                        let flag_clone = active_flag.clone();
-                                                        let endpoint = self.http_endpoint.clone();
-                                                        let handle = self.rt_handle.clone();
-                                                        
-                                                        let agent_a_id = agent.id;
-                                                        let agent_a_name = agent.name.clone();
-                                                        let agent_a_instruction = agent.instruction.clone();
-                                                        let agent_b_id = partner_id;
-                                                        let agent_b_name = partner_name.clone();
-                                                        let agent_b_instruction = partner_instruction.clone();
-                                                        let topic = agent.conversation_topic.clone();
-                                                        
-                                                        let loop_handle = handle.spawn(async move {
-                                                            crate::conversation_loop::start_conversation_loop(
-                                                                agent_a_id,
-                                                                agent_a_name,
-                                                                agent_a_instruction,
-                                                                agent_b_id,
-                                                                agent_b_name,
-                                                                agent_b_instruction,
-                                                                topic,
-                                                                endpoint,
-                                                                flag_clone,
-                                                            ).await;
-                                                        });
-                                                        
-                                                        self.conversation_loop_handles.push((agent_id, active_flag, loop_handle));
-                                                    }
+                                                    let active_flag = Arc::new(Mutex::new(true));
+                                                    let flag_clone = active_flag.clone();
+                                                    let endpoint = self.http_endpoint.clone();
+                                                    let handle = self.rt_handle.clone();
+                                                    let agent_a_id = agent.id;
+                                                    let agent_a_name = agent.name.clone();
+                                                    let agent_a_instruction = agent.instruction.clone();
+                                                    let agent_b_id = partner_id;
+                                                    let agent_b_name = partner_name.clone();
+                                                    let agent_b_instruction = partner_instruction.clone();
+                                                    let topic = agent.conversation_topic.clone();
+                                                    let last_msg = self.last_message_in_chat.clone();
+                                                    let loop_handle = handle.spawn(async move {
+                                                        crate::conversation_loop::start_conversation_loop(
+                                                            agent_a_id,
+                                                            agent_a_name,
+                                                            agent_a_instruction,
+                                                            agent_b_id,
+                                                            agent_b_name,
+                                                            agent_b_instruction,
+                                                            topic,
+                                                            endpoint,
+                                                            flag_clone,
+                                                            last_msg,
+                                                        ).await;
+                                                    });
+                                                    self.conversation_loop_handles.push((agent_id, active_flag, loop_handle));
                                                 } else {
                                                     println!("Partner agent not found");
                                                 }
@@ -413,6 +454,7 @@ impl eframe::App for MyApp {
                                         let endpoint = self.http_endpoint.clone();
                                         let ctx = ctx.clone();
                                         let handle = self.rt_handle.clone();
+                                        let last_msg = self.last_message_in_chat.clone();
                                         handle.spawn(async move {
                                             match crate::adk_integration::send_to_ollama(
                                                 &agent_clone.instruction,
@@ -421,6 +463,7 @@ impl eframe::App for MyApp {
                                                 &agent_clone.num_predict,
                                             ).await {
                                                 Ok(response) => {
+                                                    *last_msg.lock().unwrap() = Some(response.clone());
                                                     // If agent is in conversation, send via HTTP
                                                     if agent_clone.in_conversation && agent_clone.conversation_partner_id.is_some() {
                                                         if let Some(partner_id) = agent_clone.conversation_partner_id {
@@ -473,14 +516,119 @@ impl eframe::App for MyApp {
                             });
                         });
                     });
+                    });
+                    });
+                    });
                     
                     // Add 6.0px spacing between rows
                     ui.add_space(6.0);
                 }
                 
-                // Remove agents that were marked for deletion
+                // Evaluator rows
+                for evaluator in &mut self.evaluators {
+                    let eval_id = evaluator.id;
+                    let last_msg = self.last_message_in_chat.lock().unwrap().clone();
+                    let last_eval = self.last_evaluated_message_by_evaluator.lock().unwrap().get(&eval_id).cloned();
+                    let should_run = evaluator.active
+                        && last_msg.as_ref().map_or(false, |s| !s.is_empty())
+                        && last_eval.as_ref() != last_msg.as_ref();
+                    if should_run {
+                        let message = last_msg.clone().unwrap_or_default();
+                        self.last_evaluated_message_by_evaluator.lock().unwrap().insert(eval_id, message.clone());
+                        let eval_clone = evaluator.clone();
+                        let endpoint = self.http_endpoint.clone();
+                        let ctx = ctx.clone();
+                        let handle = self.rt_handle.clone();
+                        handle.spawn(async move {
+                            match crate::adk_integration::send_to_ollama(
+                                &eval_clone.instruction,
+                                &message,
+                                eval_clone.limit_token,
+                                &eval_clone.num_predict,
+                            ).await {
+                                Ok(response) => {
+                                    let response_lower = response.to_lowercase();
+                                    let sentiment = if response_lower.contains("happy") {
+                                        "happy"
+                                    } else if response_lower.contains("sad") {
+                                        "sad"
+                                    } else {
+                                        "unknown"
+                                    };
+                                    let _ = crate::http_client::send_evaluator_result(
+                                        &endpoint,
+                                        "Agent Evaluator",
+                                        sentiment,
+                                        &response,
+                                    ).await;
+                                }
+                                Err(e) => eprintln!("Ollama error: {}", e),
+                            }
+                            ctx.request_repaint();
+                        });
+                    }
+
+                    let bg_color = egui::Color32::from_rgb(45, 45, 45);
+                    let frame = egui::Frame::default()
+                        .fill(bg_color)
+                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(255, 192, 203)))
+                        .rounding(4.0)
+                        .inner_margin(egui::Margin::same(5.0))
+                        .outer_margin(egui::Margin { left: 20.0, right: 0.0, top: 0.0, bottom: 0.0 });
+                    ui.horizontal(|ui| {
+                        ui.set_max_width(ui.available_width() * 0.6);
+                        frame.show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.vertical(|ui| {
+                                    ui.label(egui::RichText::new("Agent Evaluator").strong().size(14.0));
+                                });
+                                ui.separator();
+                                ui.vertical(|ui| {
+                                    ui.spacing_mut().item_spacing = egui::Vec2::new(5.0, 2.0);
+                                    ui.horizontal(|ui| {
+                                        ui.label("Name:");
+                                        ui.add(egui::TextEdit::singleline(&mut evaluator.name));
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label("Instruction:");
+                                        ui.add(egui::TextEdit::singleline(&mut evaluator.instruction));
+                                    });
+                                    ui.horizontal(|ui| {
+                                        if ui.checkbox(&mut evaluator.limit_token, "Limit Token").changed() {
+                                            if !evaluator.limit_token {
+                                                evaluator.num_predict.clear();
+                                            }
+                                        }
+                                        if evaluator.limit_token {
+                                            ui.label("num_predict:");
+                                            ui.add(egui::TextEdit::singleline(&mut evaluator.num_predict).desired_width(80.0));
+                                        }
+                                    });
+                                    ui.separator();
+                                    let button_text = if evaluator.active { "Stop Evaluating" } else { "Evaluate" };
+                                    let button = if evaluator.active {
+                                        egui::Button::new(button_text)
+                                            .fill(egui::Color32::from_rgb(200, 50, 50))
+                                            .min_size(egui::Vec2::new(140.0, 20.0))
+                                    } else {
+                                        egui::Button::new(button_text).min_size(egui::Vec2::new(140.0, 20.0))
+                                    };
+                                    if ui.add(button).clicked() {
+                                        evaluator.active = !evaluator.active;
+                                    }
+                                });
+                            });
+                        });
+                    });
+                    ui.add_space(6.0);
+                }
+                
+                // Remove agents and evaluators that were marked for deletion
                 for id in agents_to_remove {
                     self.agents.retain(|a| a.id != id);
+                }
+                for id in evaluators_to_remove {
+                    self.evaluators.retain(|e| e.id != id);
                 }
                     });
                 });
