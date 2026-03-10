@@ -4,7 +4,7 @@
 
 - [ ] Create steps and % for Agent Evaluator
 - [ ] Create Agent References to generate data (using web search?)
-- [ ] 
+- [ ] Timings on inference 
 
 ## Completed
 

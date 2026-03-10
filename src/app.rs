@@ -60,6 +60,10 @@ impl MyApp {
 
 impl eframe::App for MyApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let any_evaluator_active = self.evaluators.iter().any(|e| e.active);
+        if any_evaluator_active {
+            ctx.request_repaint();
+        }
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.vertical(|ui| {
                 // Top row with HTTP Endpoint and buttons - green border
@@ -576,7 +580,7 @@ impl eframe::App for MyApp {
                     let bg_color = egui::Color32::from_rgb(45, 45, 45);
                     let frame = egui::Frame::default()
                         .fill(bg_color)
-                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(255, 192, 203)))
+                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(255, 0, 0)))
                         .rounding(4.0)
                         .inner_margin(egui::Margin::same(5.0))
                         .outer_margin(egui::Margin { left: 20.0, right: 0.0, top: 0.0, bottom: 0.0 });
@@ -620,6 +624,49 @@ impl eframe::App for MyApp {
                                     };
                                     if ui.add(button).clicked() {
                                         evaluator.active = !evaluator.active;
+                                        if evaluator.active {
+                                            if let Some(message) = last_msg.clone() {
+                                                if last_eval.as_ref() != Some(&message) {
+                                                    println!("[Evaluator] Manual trigger for last message ({} chars)", message.len());
+                                                    self.last_evaluated_message_by_evaluator.lock().unwrap().insert(eval_id, message.clone());
+                                                    let eval_clone = evaluator.clone();
+                                                    let endpoint = self.http_endpoint.clone();
+                                                    let ctx = ctx.clone();
+                                                    let handle = self.rt_handle.clone();
+                                                    handle.spawn(async move {
+                                                        match crate::adk_integration::send_to_ollama(
+                                                            &eval_clone.instruction,
+                                                            &message,
+                                                            eval_clone.limit_token,
+                                                            &eval_clone.num_predict,
+                                                        ).await {
+                                                            Ok(response) => {
+                                                                let response_lower = response.to_lowercase();
+                                                                let sentiment = if response_lower.contains("happy") {
+                                                                    "happy"
+                                                                } else if response_lower.contains("sad") {
+                                                                    "sad"
+                                                                } else {
+                                                                    "unknown"
+                                                                };
+                                                                if let Err(e) = crate::http_client::send_evaluator_result(
+                                                                    &endpoint,
+                                                                    "Agent Evaluator",
+                                                                    sentiment,
+                                                                    &response,
+                                                                ).await {
+                                                                    eprintln!("[Evaluator] Failed to send to web-chat: {}", e);
+                                                                } else {
+                                                                    println!("[Evaluator] Sent to web-chat: {} -> {}", sentiment, &response[..response.len().min(60)]);
+                                                                }
+                                                            }
+                                                            Err(e) => eprintln!("[Evaluator] Ollama error: {}", e),
+                                                        }
+                                                        ctx.request_repaint();
+                                                    });
+                                                }
+                                            }
+                                        }
                                     }
                                 });
                             });
