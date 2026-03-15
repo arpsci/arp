@@ -35,6 +35,18 @@ struct Evaluator {
 }
 
 #[derive(Clone)]
+struct Researcher {
+    id: usize,
+    manager_id: usize,
+    name: String,
+    topic_mode: String,
+    instruction: String,
+    limit_token: bool,
+    num_predict: String,
+    active: bool,
+}
+
+#[derive(Clone)]
 struct AgentManager {
     id: usize,
     name: String,
@@ -51,9 +63,13 @@ pub struct MyApp {
     next_agent_id: usize,
     evaluators: Vec<Evaluator>,
     next_evaluator_id: usize,
+    researchers: Vec<Researcher>,
+    next_researcher_id: usize,
+    selected_worker_id: Option<usize>,
     http_endpoint: String,
     last_message_in_chat: Arc<Mutex<Option<String>>>,
     last_evaluated_message_by_evaluator: Arc<Mutex<std::collections::HashMap<usize, String>>>,
+    last_researched_message_by_researcher: Arc<Mutex<std::collections::HashMap<usize, String>>>,
     conversation_loop_handles: Vec<(usize, Arc<Mutex<bool>>, tokio::task::JoinHandle<()>)>, // (agent_id, active_flag, handle)
 }
 
@@ -70,10 +86,14 @@ impl MyApp {
             next_agent_id: 1,
             evaluators: Vec::new(),
             next_evaluator_id: 1,
+            researchers: Vec::new(),
+            next_researcher_id: 1,
+            selected_worker_id: None,
             http_endpoint: std::env::var("CONVERSATION_HTTP_ENDPOINT")
                 .unwrap_or_else(|_| "http://localhost:3000/".to_string()),
             last_message_in_chat: Arc::new(Mutex::new(None)),
             last_evaluated_message_by_evaluator: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            last_researched_message_by_researcher: Arc::new(Mutex::new(std::collections::HashMap::new())),
             conversation_loop_handles: Vec::new(),
         }
     }
@@ -96,7 +116,8 @@ impl eframe::App for MyApp {
             });
         }
         let any_evaluator_active = self.evaluators.iter().any(|e| e.active);
-        if any_evaluator_active {
+        let any_researcher_active = self.researchers.iter().any(|r| r.active);
+        if any_evaluator_active || any_researcher_active {
             ctx.request_repaint();
         }
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -125,89 +146,93 @@ impl eframe::App for MyApp {
                                 .inner_margin(egui::Margin::same(6.0));
 
                             settings_panel.show(ui, |ui| {
-                                // Ollama model selection
                                 ui.horizontal(|ui| {
-                                    ui.label("Ollama Model:");
-                                    let models = self.ollama_models.lock().unwrap().clone();
-                                    if self.selected_ollama_model.is_empty() {
-                                        if let Some(first) = models.first() {
-                                            self.selected_ollama_model = first.clone();
-                                        }
-                                    }
-                                    egui::ComboBox::from_id_source("ollama_model_selector")
-                                        .selected_text(if self.selected_ollama_model.is_empty() {
-                                            "Select model".to_string()
-                                        } else {
-                                            self.selected_ollama_model.clone()
-                                        })
-                                        .show_ui(ui, |ui| {
-                                            for model in &models {
-                                                ui.selectable_value(&mut self.selected_ollama_model, model.clone(), model);
-                                            }
-                                        });
-
-                                    let loading = *self.ollama_models_loading.lock().unwrap();
-                                    if ui.button(if loading { "Loading" } else { "Refresh" }).clicked() && !loading {
-                                        *self.ollama_models_loading.lock().unwrap() = true;
-                                        let models_arc = self.ollama_models.clone();
-                                        let loading_arc = self.ollama_models_loading.clone();
-                                        let ctx = ctx.clone();
-                                        let handle = self.rt_handle.clone();
-                                        handle.spawn(async move {
-                                            let models = crate::adk_integration::fetch_ollama_models().await.unwrap_or_default();
-                                            *models_arc.lock().unwrap() = models;
-                                            *loading_arc.lock().unwrap() = false;
-                                            ctx.request_repaint();
-                                        });
-                                    }
-                                });
-                                ui.add_space(5.0);
-
-                                // HTTP Endpoint configuration
-                                ui.horizontal(|ui| {
-                                    ui.label("Chat HTTP Endpoint:");
-                                    ui.add(egui::TextEdit::singleline(&mut self.http_endpoint)
-                                        .desired_width(200.0));
-                                });
-                                ui.add_space(5.0);
-
-                                ui.horizontal(|ui| {
-                                    if ui.button("Create Manager").clicked() {
-                                        let used_ids: std::collections::HashSet<usize> =
-                                            self.managers.iter().map(|m| m.id).collect();
-                                        let mut new_id = 1;
-                                        while used_ids.contains(&new_id) {
-                                            new_id += 1;
-                                        }
-                                        self.managers.push(AgentManager {
-                                            id: new_id,
-                                            name: format!("Agent Manager {}", new_id),
-                                        });
-                                        if new_id >= self.next_manager_id {
-                                            self.next_manager_id = new_id + 1;
-                                        }
-                                    }
-                                    ui.add_space(6.0);
-
-                                    if ui.button("Test API").clicked() {
-                                        println!("Pinging Ollama");
-                                        let ctx = ctx.clone();
-                                        let handle = self.rt_handle.clone();
-                                        let model = self.selected_ollama_model.clone();
-                                        handle.spawn(async move {
-                                            match crate::adk_integration::test_ollama(
-                                                if model.trim().is_empty() { None } else { Some(model.as_str()) }
-                                            ).await {
-                                                Ok(_response) => {
-                                                    // Response is already printed during streaming in test_ollama()
-                                                }
-                                                Err(e) => {
-                                                    eprintln!("Ollama error: {}", e);
+                                    ui.vertical(|ui| {
+                                        // Ollama model selection
+                                        ui.horizontal(|ui| {
+                                            ui.label("Ollama Model:");
+                                            let models = self.ollama_models.lock().unwrap().clone();
+                                            if self.selected_ollama_model.is_empty() {
+                                                if let Some(first) = models.first() {
+                                                    self.selected_ollama_model = first.clone();
                                                 }
                                             }
-                                            ctx.request_repaint();
+                                            egui::ComboBox::from_id_source("ollama_model_selector")
+                                                .selected_text(if self.selected_ollama_model.is_empty() {
+                                                    "Select model".to_string()
+                                                } else {
+                                                    self.selected_ollama_model.clone()
+                                                })
+                                                .show_ui(ui, |ui| {
+                                                    for model in &models {
+                                                        ui.selectable_value(&mut self.selected_ollama_model, model.clone(), model);
+                                                    }
+                                                });
+
+                                            let loading = *self.ollama_models_loading.lock().unwrap();
+                                            if ui.button(if loading { "Loading" } else { "Refresh" }).clicked() && !loading {
+                                                *self.ollama_models_loading.lock().unwrap() = true;
+                                                let models_arc = self.ollama_models.clone();
+                                                let loading_arc = self.ollama_models_loading.clone();
+                                                let ctx = ctx.clone();
+                                                let handle = self.rt_handle.clone();
+                                                handle.spawn(async move {
+                                                    let models = crate::adk_integration::fetch_ollama_models().await.unwrap_or_default();
+                                                    *models_arc.lock().unwrap() = models;
+                                                    *loading_arc.lock().unwrap() = false;
+                                                    ctx.request_repaint();
+                                                });
+                                            }
                                         });
-                                    }
+                                        ui.add_space(5.0);
+
+                                        // HTTP Endpoint configuration
+                                        ui.horizontal(|ui| {
+                                            ui.label("Chat HTTP Endpoint:");
+                                            ui.add(egui::TextEdit::singleline(&mut self.http_endpoint)
+                                                .desired_width(200.0));
+                                        });
+                                        ui.add_space(5.0);
+
+                                        ui.horizontal(|ui| {
+                                            if ui.button("Create Manager").clicked() {
+                                                let used_ids: std::collections::HashSet<usize> =
+                                                    self.managers.iter().map(|m| m.id).collect();
+                                                let mut new_id = 1;
+                                                while used_ids.contains(&new_id) {
+                                                    new_id += 1;
+                                                }
+                                                self.managers.push(AgentManager {
+                                                    id: new_id,
+                                                    name: format!("Agent Manager {}", new_id),
+                                                });
+                                                if new_id >= self.next_manager_id {
+                                                    self.next_manager_id = new_id + 1;
+                                                }
+                                            }
+                                            ui.add_space(6.0);
+
+                                            if ui.button("Test API").clicked() {
+                                                println!("Pinging Ollama");
+                                                let ctx = ctx.clone();
+                                                let handle = self.rt_handle.clone();
+                                                let model = self.selected_ollama_model.clone();
+                                                handle.spawn(async move {
+                                                    match crate::adk_integration::test_ollama(
+                                                        if model.trim().is_empty() { None } else { Some(model.as_str()) }
+                                                    ).await {
+                                                        Ok(_response) => {
+                                                            // Response is already printed during streaming in test_ollama()
+                                                        }
+                                                        Err(e) => {
+                                                            eprintln!("Ollama error: {}", e);
+                                                        }
+                                                    }
+                                                    ctx.request_repaint();
+                                                });
+                                            }
+                                        });
+                                    });
                                 });
                             });
                         });
@@ -233,13 +258,17 @@ impl eframe::App for MyApp {
                                 ui.set_width(available_width);
                                 egui::ScrollArea::vertical().show(ui, |ui| {
                         
-                // Collect IDs of managers/agents/evaluators to remove
+                // Collect IDs of managers/agents/evaluators/researchers to remove
                 let mut managers_to_remove = Vec::new();
                 let mut agents_to_remove = Vec::new();
                 let mut evaluators_to_remove = Vec::new();
+                let mut researchers_to_remove = Vec::new();
                 
                 let evaluator_names: Vec<(usize, usize, String)> = self.evaluators.iter()
                     .map(|e| (e.id, e.manager_id, e.name.clone()))
+                    .collect();
+                let researcher_names: Vec<(usize, usize, String)> = self.researchers.iter()
+                    .map(|r| (r.id, r.manager_id, r.name.clone()))
                     .collect();
                 
                 // Collect agent info for partner dropdown (before mutable borrow)
@@ -336,6 +365,27 @@ impl eframe::App for MyApp {
                                             self.next_evaluator_id = new_id + 1;
                                         }
                                     }
+                                    if ui.button("Create Researcher").clicked() {
+                                        let used_ids: std::collections::HashSet<usize> =
+                                            self.researchers.iter().map(|r| r.id).collect();
+                                        let mut new_id = 1;
+                                        while used_ids.contains(&new_id) {
+                                            new_id += 1;
+                                        }
+                                        self.researchers.push(Researcher {
+                                            id: new_id,
+                                            manager_id: manager.id,
+                                            name: format!("Researcher {}", new_id),
+                                            topic_mode: String::new(),
+                                            instruction: "".to_string(),
+                                            limit_token: false,
+                                            num_predict: String::new(),
+                                            active: false,
+                                        });
+                                        if new_id >= self.next_researcher_id {
+                                            self.next_researcher_id = new_id + 1;
+                                        }
+                                    }
                                     if ui.button("Erase Manager").clicked() {
                                         managers_to_remove.push(manager.id);
                                     }
@@ -351,43 +401,113 @@ impl eframe::App for MyApp {
                                     .iter()
                                     .filter(|e| e.manager_id == manager.id)
                                     .count();
+                                let researcher_count = self
+                                    .researchers
+                                    .iter()
+                                    .filter(|r| r.manager_id == manager.id)
+                                    .count();
 
                                 egui::CollapsingHeader::new(format!("Agent Workers ({})", worker_count))
                                     .id_source(ui.id().with(manager.id).with("workers_section"))
                                     .default_open(true)
                                     .show(ui, |ui| {
-                                        for (agent_id, manager_id, agent_name) in &agent_names {
-                                            if *manager_id != manager.id {
-                                                continue;
-                                            }
-                                            ui.horizontal(|ui| {
-                                                if ui.button("Status").clicked() {
-                                                    if let Some(agent) = self.agents.iter().find(|a| a.id == *agent_id) {
-                                                        println!("=== Agent {} Status ===", agent.id);
-                                                        println!("Manager: {}", agent.manager_id);
-                                                        println!("Name: {}", agent.name);
-                                                        println!("Instruction: {}", agent.instruction);
-                                                        println!("Limit Token: {}", agent.limit_token);
-                                                        if agent.limit_token {
-                                                            println!("num_predict: {}", agent.num_predict);
-                                                        }
-                                                        println!("Selected: {}", agent.selected);
-                                                        println!("In Conversation: {}", agent.in_conversation);
-                                                        if agent.in_conversation {
-                                                            println!("Topic: {}", agent.conversation_topic);
-                                                            if let Some(pid) = agent.conversation_partner_id {
-                                                                println!("Partner: Agent {}", pid);
-                                                            }
-                                                        }
-                                                        println!("======================");
-                                                    }
-                                                }
-                                                if ui.button("Erase").clicked() {
-                                                    agents_to_remove.push(*agent_id);
-                                                }
-                                                ui.label(agent_name);
-                                            });
+                                        let worker_options: Vec<(usize, String)> = self
+                                            .agents
+                                            .iter()
+                                            .filter(|a| a.manager_id == manager.id)
+                                            .map(|a| (a.id, format!("{} (M{})", a.name, a.manager_id)))
+                                            .collect();
+
+                                        if worker_options.is_empty() {
+                                            self.selected_worker_id = None;
+                                        } else if self.selected_worker_id.is_none()
+                                            || worker_options
+                                                .iter()
+                                                .all(|(id, _)| Some(*id) != self.selected_worker_id)
+                                        {
+                                            self.selected_worker_id = Some(worker_options[0].0);
                                         }
+
+                                        ui.horizontal(|ui| {
+                                            if let Some(selected_id) = self.selected_worker_id {
+                                                if let Some(selected_agent) = self.agents.iter_mut().find(|a| a.id == selected_id) {
+                                                    ui.label("Input:");
+                                                    ui.add(egui::TextEdit::singleline(&mut selected_agent.input).desired_width(180.0));
+                                                    if ui.button("Send").clicked() {
+                                                        let agent_clone = selected_agent.clone();
+                                                        let endpoint = self.http_endpoint.clone();
+                                                        let ctx = ctx.clone();
+                                                        let handle = self.rt_handle.clone();
+                                                        let last_msg = self.last_message_in_chat.clone();
+                                                        let selected_model = if self.selected_ollama_model.trim().is_empty() {
+                                                            None
+                                                        } else {
+                                                            Some(self.selected_ollama_model.clone())
+                                                        };
+                                                        handle.spawn(async move {
+                                                            match crate::adk_integration::send_to_ollama(
+                                                                &agent_clone.instruction,
+                                                                &agent_clone.input,
+                                                                agent_clone.limit_token,
+                                                                &agent_clone.num_predict,
+                                                                selected_model.as_deref(),
+                                                            ).await {
+                                                                Ok(response) => {
+                                                                    *last_msg.lock().unwrap() = Some(response.clone());
+                                                                    if agent_clone.in_conversation && agent_clone.conversation_partner_id.is_some() {
+                                                                        if let Some(partner_id) = agent_clone.conversation_partner_id {
+                                                                            let partner_name = format!("Agent {}", partner_id);
+                                                                            if let Err(e) = crate::http_client::send_conversation_message(
+                                                                                &endpoint,
+                                                                                agent_clone.id,
+                                                                                &agent_clone.name,
+                                                                                partner_id,
+                                                                                &partner_name,
+                                                                                &agent_clone.conversation_topic,
+                                                                                &response,
+                                                                            ).await {
+                                                                                eprintln!("Failed to send HTTP message: {}", e);
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                                Err(e) => {
+                                                                    eprintln!("Ollama error: {}", e);
+                                                                }
+                                                            }
+                                                            ctx.request_repaint();
+                                                        });
+                                                    }
+                                                    if ui.checkbox(&mut selected_agent.limit_token, "Limit Token").changed() {
+                                                        if !selected_agent.limit_token {
+                                                            selected_agent.num_predict.clear();
+                                                        }
+                                                    }
+                                                    if selected_agent.limit_token {
+                                                        ui.label("num_predict:");
+                                                        ui.add(egui::TextEdit::singleline(&mut selected_agent.num_predict).desired_width(80.0));
+                                                    }
+                                                    ui.separator();
+                                                }
+                                            }
+                                            ui.label("Worker:");
+                                            let selected_text = if let Some(selected_id) = self.selected_worker_id {
+                                                worker_options
+                                                    .iter()
+                                                    .find(|(id, _)| *id == selected_id)
+                                                    .map(|(_, name)| name.clone())
+                                                    .unwrap_or_else(|| "Select".to_string())
+                                            } else {
+                                                "Select".to_string()
+                                            };
+                                            egui::ComboBox::from_id_source(ui.id().with(manager.id).with("worker_selector"))
+                                                .selected_text(selected_text)
+                                                .show_ui(ui, |ui| {
+                                                    for (id, name) in &worker_options {
+                                                        ui.selectable_value(&mut self.selected_worker_id, Some(*id), name);
+                                                    }
+                                                });
+                                        });
 
                                         ui.separator();
                                         ui.add_space(6.0);
@@ -421,6 +541,9 @@ impl eframe::App for MyApp {
                                             ui.horizontal(|ui| {
                                                 ui.vertical(|ui| {
                                                     ui.label(egui::RichText::new("Agent Worker").strong().size(12.0));
+                                                    if agent.id > 0 {
+                                                        ui.small(format!("ID: {}", agent.id));
+                                                    }
                                                 });
                                                 ui.separator();
                                                 ui.vertical(|ui| {
@@ -546,180 +669,109 @@ impl eframe::App for MyApp {
                                                             } else {
                                                                 "Start Conversation"
                                                             };
-                                                            let button = if agent.conversation_active {
-                                                                egui::Button::new(button_text)
-                                                                    .fill(egui::Color32::from_rgb(200, 50, 50))
-                                                            } else {
-                                                                egui::Button::new(button_text)
-                                                            };
+                                                            let button = egui::Button::new(button_text);
 
                                                             if !is_selected_by_other_agent {
                                                                 ui.separator();
-                                                            }
-                                                            
-                                                            if !is_selected_by_other_agent && ui.add(button).clicked() {
-                                                                if agent.conversation_active {
-                                                                    agent.conversation_active = false;
-                                                                    agent.in_conversation = false;
-                                                                    self.conversation_loop_handles.retain(|(aid, flag, _)| {
-                                                                        if *aid == agent_id {
-                                                                            *flag.lock().unwrap() = false;
-                                                                            false
-                                                                        } else {
-                                                                            true
-                                                                        }
-                                                                    });
-                                                                } else {
-                                                                    if !agent.conversation_topic.is_empty() {
-                                                                        let maybe_partner = if agent.conversation_mode == "Unique" {
-                                                                            Some((agent.id, agent.name.clone(), agent.instruction.clone()))
-                                                                        } else if let Some(partner_id) = agent.conversation_partner_id {
-                                                                            agents_info
-                                                                                .iter()
-                                                                                .find(|(id, _, _, _)| *id == partner_id)
-                                                                                .map(|(_, _, partner_name, partner_instruction)| {
-                                                                                    (partner_id, partner_name.clone(), partner_instruction.clone())
-                                                                                })
-                                                                        } else {
-                                                                            None
-                                                                        };
-
-                                                                        if let Some((partner_id, partner_name, partner_instruction)) = maybe_partner {
-                                                                                agent.conversation_active = true;
-                                                                                agent.in_conversation = true;
-                                                                                let active_flag = Arc::new(Mutex::new(true));
-                                                                                let flag_clone = active_flag.clone();
-                                                                                let endpoint = self.http_endpoint.clone();
-                                                                                let handle = self.rt_handle.clone();
-                                                                                let agent_a_id = agent.id;
-                                                                                let agent_a_name = agent.name.clone();
-                                                                                let agent_a_instruction = agent.instruction.clone();
-                                                                                let agent_b_id = partner_id;
-                                                                                let agent_b_name = partner_name;
-                                                                                let agent_b_instruction = partner_instruction;
-                                                                                let topic = agent.conversation_topic.clone();
-                                                                                let last_msg = self.last_message_in_chat.clone();
-                                                                                let selected_model = if self.selected_ollama_model.trim().is_empty() {
-                                                                                    None
+                                                                ui.horizontal(|ui| {
+                                                                    if ui.add(button).clicked() {
+                                                                        if agent.conversation_active {
+                                                                            agent.conversation_active = false;
+                                                                            agent.in_conversation = false;
+                                                                            self.conversation_loop_handles.retain(|(aid, flag, _)| {
+                                                                                if *aid == agent_id {
+                                                                                    *flag.lock().unwrap() = false;
+                                                                                    false
                                                                                 } else {
-                                                                                    Some(self.selected_ollama_model.clone())
-                                                                                };
-                                                                                let loop_handle = handle.spawn(async move {
-                                                                                    crate::conversation_loop::start_conversation_loop(
-                                                                                        agent_a_id,
-                                                                                        agent_a_name,
-                                                                                        agent_a_instruction,
-                                                                                        agent_b_id,
-                                                                                        agent_b_name,
-                                                                                        agent_b_instruction,
-                                                                                        topic,
-                                                                                        endpoint,
-                                                                                        flag_clone,
-                                                                                        last_msg,
-                                                                                        selected_model,
-                                                                                    ).await;
-                                                                                });
-                                                                                self.conversation_loop_handles.push((agent_id, active_flag, loop_handle));
-                                                                        } else {
-                                                                            println!("Cannot start conversation: need partner");
-                                                                        }
-                                                                    } else {
-                                                                        println!("Cannot start conversation: need topic");
-                                                                    }
-                                                                }
-                                                            }
-                                                        });
-                                                        
-                                                        if !is_selected_by_other_agent {
-                                                            ui.separator();
-                                                        }
-                                                        
-                                                        if !is_selected_by_other_agent {
-                                                        ui.vertical(|ui| {
-                                                            ui.set_width(ui.available_width());
-                                                            ui.spacing_mut().item_spacing = egui::Vec2::new(5.0, 5.0);
-
-                                                            ui.label("Ollama Endpoint:");
-                                                            ui.label(
-                                                                std::env::var("OLLAMA_BASE_URL")
-                                                                    .unwrap_or_else(|_| "http://127.0.0.1:11434".to_string())
-                                                            );
-                                                        
-                                                            ui.horizontal(|ui| {
-                                                                ui.label("Input:");
-                                                                ui.add(egui::TextEdit::singleline(&mut agent.input).desired_width(200.0));
-                                                            });
-
-                                                            ui.horizontal(|ui| {
-                                                                let send_clicked = ui.button("Send").clicked();
-                                                                if send_clicked {
-                                                                    let agent_clone = agent.clone();
-                                                                    let endpoint = self.http_endpoint.clone();
-                                                                    let ctx = ctx.clone();
-                                                                    let handle = self.rt_handle.clone();
-                                                                    let last_msg = self.last_message_in_chat.clone();
-                                                                    let selected_model = if self.selected_ollama_model.trim().is_empty() {
-                                                                        None
-                                                                    } else {
-                                                                        Some(self.selected_ollama_model.clone())
-                                                                    };
-                                                                    handle.spawn(async move {
-                                                                        match crate::adk_integration::send_to_ollama(
-                                                                            &agent_clone.instruction,
-                                                                            &agent_clone.input,
-                                                                            agent_clone.limit_token,
-                                                                            &agent_clone.num_predict,
-                                                                            selected_model.as_deref(),
-                                                                        ).await {
-                                                                            Ok(response) => {
-                                                                                *last_msg.lock().unwrap() = Some(response.clone());
-                                                                                if agent_clone.in_conversation && agent_clone.conversation_partner_id.is_some() {
-                                                                                    if let Some(partner_id) = agent_clone.conversation_partner_id {
-                                                                                        let partner_name = format!("Agent {}", partner_id);
-                                                                                        if let Err(e) = crate::http_client::send_conversation_message(
-                                                                                            &endpoint,
-                                                                                            agent_clone.id,
-                                                                                            &agent_clone.name,
-                                                                                            partner_id,
-                                                                                            &partner_name,
-                                                                                            &agent_clone.conversation_topic,
-                                                                                            &response,
-                                                                                        ).await {
-                                                                                            eprintln!("Failed to send HTTP message: {}", e);
-                                                                                        }
-                                                                                    }
+                                                                                    true
                                                                                 }
-                                                                            }
-                                                                            Err(e) => {
-                                                                                eprintln!("Ollama error: {}", e);
+                                                                            });
+                                                                        } else {
+                                                                            if !agent.conversation_topic.is_empty() {
+                                                                                let maybe_partner = if agent.conversation_mode == "Unique" {
+                                                                                    Some((agent.id, agent.name.clone(), agent.instruction.clone()))
+                                                                                } else if let Some(partner_id) = agent.conversation_partner_id {
+                                                                                    agents_info
+                                                                                        .iter()
+                                                                                        .find(|(id, _, _, _)| *id == partner_id)
+                                                                                        .map(|(_, _, partner_name, partner_instruction)| {
+                                                                                            (partner_id, partner_name.clone(), partner_instruction.clone())
+                                                                                        })
+                                                                                } else {
+                                                                                    None
+                                                                                };
+
+                                                                                if let Some((partner_id, partner_name, partner_instruction)) = maybe_partner {
+                                                                                        agent.conversation_active = true;
+                                                                                        agent.in_conversation = true;
+                                                                                        let active_flag = Arc::new(Mutex::new(true));
+                                                                                        let flag_clone = active_flag.clone();
+                                                                                        let endpoint = self.http_endpoint.clone();
+                                                                                        let handle = self.rt_handle.clone();
+                                                                                        let agent_a_id = agent.id;
+                                                                                        let agent_a_name = agent.name.clone();
+                                                                                        let agent_a_instruction = agent.instruction.clone();
+                                                                                        let agent_b_id = partner_id;
+                                                                                        let agent_b_name = partner_name;
+                                                                                        let agent_b_instruction = partner_instruction;
+                                                                                        let topic = agent.conversation_topic.clone();
+                                                                                        let last_msg = self.last_message_in_chat.clone();
+                                                                                        let selected_model = if self.selected_ollama_model.trim().is_empty() {
+                                                                                            None
+                                                                                        } else {
+                                                                                            Some(self.selected_ollama_model.clone())
+                                                                                        };
+                                                                                        let loop_handle = handle.spawn(async move {
+                                                                                            crate::conversation_loop::start_conversation_loop(
+                                                                                                agent_a_id,
+                                                                                                agent_a_name,
+                                                                                                agent_a_instruction,
+                                                                                                agent_b_id,
+                                                                                                agent_b_name,
+                                                                                                agent_b_instruction,
+                                                                                                topic,
+                                                                                                endpoint,
+                                                                                                flag_clone,
+                                                                                                last_msg,
+                                                                                                selected_model,
+                                                                                            ).await;
+                                                                                        });
+                                                                                        self.conversation_loop_handles.push((agent_id, active_flag, loop_handle));
+                                                                                } else {
+                                                                                    println!("Cannot start conversation: need partner");
+                                                                                }
+                                                                            } else {
+                                                                                println!("Cannot start conversation: need topic");
                                                                             }
                                                                         }
-                                                                        ctx.request_repaint();
-                                                                    });
-                                                                }
-                                                            });
-                                                            
-                                                            ui.horizontal(|ui| {
-                                                                if ui.checkbox(&mut agent.limit_token, "Limit Token").changed() {
-                                                                    if !agent.limit_token {
-                                                                        agent.num_predict.clear();
                                                                     }
-                                                                }
-                                                                
-                                                                if agent.limit_token {
-                                                                    ui.label("num_predict:");
-                                                                    ui.add(egui::TextEdit::singleline(&mut agent.num_predict)
-                                                                        .desired_width(80.0));
-                                                                }
-                                                            });
-                                                            
-                                                            if agent.conversation_active {
-                                                                if let Some(pid) = agent.conversation_partner_id {
-                                                                    ui.label(format!("Chatting with Agent {}", pid));
-                                                                }
+                                                                    if ui.button("Status").clicked() {
+                                                                        println!("=== Agent {} Status ===", agent.id);
+                                                                        println!("Manager: {}", agent.manager_id);
+                                                                        println!("Name: {}", agent.name);
+                                                                        println!("Instruction: {}", agent.instruction);
+                                                                        println!("Input: {}", agent.input);
+                                                                        println!("Limit Token: {}", agent.limit_token);
+                                                                        if agent.limit_token {
+                                                                            println!("num_predict: {}", agent.num_predict);
+                                                                        }
+                                                                        println!("Selected: {}", agent.selected);
+                                                                        println!("In Conversation: {}", agent.in_conversation);
+                                                                        if agent.in_conversation {
+                                                                            println!("Topic: {}", agent.conversation_topic);
+                                                                            if let Some(pid) = agent.conversation_partner_id {
+                                                                                println!("Partner: Agent {}", pid);
+                                                                            }
+                                                                        }
+                                                                        println!("======================");
+                                                                    }
+                                                                    if ui.button("Erase").clicked() {
+                                                                        agents_to_remove.push(agent_id);
+                                                                    }
+                                                                });
                                                             }
                                                         });
-                                                        }
+                                                        
                                                     });
                                                 });
                                             });
@@ -899,13 +951,7 @@ impl eframe::App for MyApp {
                                                     });
                                                     ui.separator();
                                                     let button_text = if evaluator.active { "Stop Evaluating" } else { "Evaluate" };
-                                                    let button = if evaluator.active {
-                                                        egui::Button::new(button_text)
-                                                            .fill(egui::Color32::from_rgb(200, 50, 50))
-                                                            .min_size(egui::Vec2::new(140.0, 20.0))
-                                                    } else {
-                                                        egui::Button::new(button_text).min_size(egui::Vec2::new(140.0, 20.0))
-                                                    };
+                                                    let button = egui::Button::new(button_text).min_size(egui::Vec2::new(140.0, 20.0));
                                                     if ui.add(button).clicked() {
                                                         evaluator.active = !evaluator.active;
                                                         if evaluator.active {
@@ -991,13 +1037,233 @@ impl eframe::App for MyApp {
                                     ui.add_space(6.0);
                                 }
                                     });
+
+                                egui::CollapsingHeader::new(format!("Agent Researchers ({})", researcher_count))
+                                    .id_source(ui.id().with(manager.id).with("researchers_section"))
+                                    .default_open(true)
+                                    .show(ui, |ui| {
+                                        for (researcher_id, manager_id, researcher_name) in &researcher_names {
+                                            if *manager_id != manager.id {
+                                                continue;
+                                            }
+                                            ui.horizontal(|ui| {
+                                                if ui.button("Status").clicked() {
+                                                    if let Some(r) = self.researchers.iter().find(|x| x.id == *researcher_id) {
+                                                        println!("=== Researcher {} Status ===", r.id);
+                                                        println!("Manager: {}", r.manager_id);
+                                                        println!("Name: {}", r.name);
+                                                        println!("Topic: {}", r.topic_mode);
+                                                        println!("Instruction: {}", r.instruction);
+                                                        println!("=========================");
+                                                    }
+                                                }
+                                                if ui.button("Erase").clicked() {
+                                                    researchers_to_remove.push(*researcher_id);
+                                                }
+                                                ui.label(researcher_name);
+                                            });
+                                        }
+
+                                        ui.separator();
+                                        ui.add_space(6.0);
+
+                                        for researcher in &mut self.researchers {
+                                            if researcher.manager_id != manager.id {
+                                                continue;
+                                            }
+                                            let researcher_id = researcher.id;
+                                            let last_msg = self.last_message_in_chat.lock().unwrap().clone();
+                                            let last_research = self.last_researched_message_by_researcher.lock().unwrap().get(&researcher_id).cloned();
+                                            let should_run = researcher.active
+                                                && last_msg.as_ref().map_or(false, |s| !s.is_empty())
+                                                && last_research.as_ref() != last_msg.as_ref();
+                                            if should_run {
+                                                let message = last_msg.clone().unwrap_or_default();
+                                                println!("[Researcher] Generating references from last message ({} chars)...", message.len());
+                                                self.last_researched_message_by_researcher.lock().unwrap().insert(researcher_id, message.clone());
+                                                let researcher_clone = researcher.clone();
+                                                let endpoint = self.http_endpoint.clone();
+                                                let ctx = ctx.clone();
+                                                let handle = self.rt_handle.clone();
+                                                let selected_model = if self.selected_ollama_model.trim().is_empty() {
+                                                    None
+                                                } else {
+                                                    Some(self.selected_ollama_model.clone())
+                                                };
+                                                handle.spawn(async move {
+                                                    let topic = if researcher_clone.topic_mode.trim().is_empty() {
+                                                        "Articles".to_string()
+                                                    } else {
+                                                        researcher_clone.topic_mode.clone()
+                                                    };
+                                                    let generation_instruction = format!(
+                                                        "{}\n\nUsing the latest chat message, suggest 3 {} references related to what was said. Keep it concise with bullet points: title and one-line why it matches.",
+                                                        researcher_clone.instruction,
+                                                        topic.to_lowercase()
+                                                    );
+                                                    match crate::adk_integration::send_to_ollama(
+                                                        &generation_instruction,
+                                                        &message,
+                                                        researcher_clone.limit_token,
+                                                        &researcher_clone.num_predict,
+                                                        selected_model.as_deref(),
+                                                    ).await {
+                                                        Ok(response) => {
+                                                            if let Err(e) = crate::http_client::send_researcher_result(
+                                                                &endpoint,
+                                                                "Agent Researcher",
+                                                                &topic,
+                                                                &response,
+                                                            ).await {
+                                                                eprintln!("[Researcher] Failed to send to ams-chat: {}", e);
+                                                            } else {
+                                                                println!("[Researcher] Sent references to ams-chat [{}]", topic);
+                                                            }
+                                                        }
+                                                        Err(e) => eprintln!("[Researcher] Ollama error: {}", e),
+                                                    }
+                                                    ctx.request_repaint();
+                                                });
+                                            }
+
+                                            let bg_color = egui::Color32::from_rgb(45, 45, 45);
+                                            let frame = egui::Frame::default()
+                                                .fill(bg_color)
+                                                .stroke(egui::Stroke::new(1.0, panel_border_color))
+                                                .rounding(4.0)
+                                                .inner_margin(egui::Margin::same(5.0))
+                                                .outer_margin(egui::Margin { left: 0.0, right: 0.0, top: 0.0, bottom: 0.0 });
+                                            ui.horizontal(|ui| {
+                                                ui.set_max_width(ui.available_width());
+                                                frame.show(ui, |ui| {
+                                                    ui.horizontal(|ui| {
+                                                        ui.vertical(|ui| {
+                                                            ui.label(egui::RichText::new("Agent Researcher").strong().size(12.0));
+                                                        });
+                                                        ui.separator();
+                                                        ui.vertical(|ui| {
+                                                            ui.spacing_mut().item_spacing = egui::Vec2::new(5.0, 2.0);
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("Name:");
+                                                                ui.add(egui::TextEdit::singleline(&mut researcher.name));
+                                                            });
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("Topics:");
+                                                                egui::ComboBox::from_id_source(ui.id().with(researcher_id).with("research_topic_mode"))
+                                                                    .selected_text(if researcher.topic_mode.is_empty() {
+                                                                        "Select".to_string()
+                                                                    } else {
+                                                                        researcher.topic_mode.clone()
+                                                                    })
+                                                                    .show_ui(ui, |ui| {
+                                                                        if ui.selectable_label(researcher.topic_mode == "Articles", "Articles").clicked() {
+                                                                            researcher.topic_mode = "Articles".to_string();
+                                                                            researcher.instruction = "Generate article references connected to the message context. Prefer a mix of classic and recent pieces.".to_string();
+                                                                            println!("Researcher {} topic selected: Articles", researcher.id);
+                                                                        }
+                                                                        if ui.selectable_label(researcher.topic_mode == "Movies", "Movies").clicked() {
+                                                                            researcher.topic_mode = "Movies".to_string();
+                                                                            researcher.instruction = "Generate movie references connected to the message context. Prefer diverse genres and well-known titles.".to_string();
+                                                                            println!("Researcher {} topic selected: Movies", researcher.id);
+                                                                        }
+                                                                        if ui.selectable_label(researcher.topic_mode == "Music", "Music").clicked() {
+                                                                            researcher.topic_mode = "Music".to_string();
+                                                                            researcher.instruction = "Generate music references connected to the message context. Include artist and track or album when possible.".to_string();
+                                                                            println!("Researcher {} topic selected: Music", researcher.id);
+                                                                        }
+                                                                    });
+                                                            });
+                                                            ui.horizontal(|ui| {
+                                                                ui.label("Instruction:");
+                                                                ui.add(egui::TextEdit::singleline(&mut researcher.instruction));
+                                                            });
+                                                            ui.horizontal(|ui| {
+                                                                if ui.checkbox(&mut researcher.limit_token, "Limit Token").changed() {
+                                                                    if !researcher.limit_token {
+                                                                        researcher.num_predict.clear();
+                                                                    }
+                                                                }
+                                                                if researcher.limit_token {
+                                                                    ui.label("num_predict:");
+                                                                    ui.add(egui::TextEdit::singleline(&mut researcher.num_predict).desired_width(80.0));
+                                                                }
+                                                            });
+                                                            ui.separator();
+                                                            let button_text = if researcher.active { "Stop Researching" } else { "Research" };
+                                                            let button = egui::Button::new(button_text).min_size(egui::Vec2::new(140.0, 20.0));
+                                                            if ui.add(button).clicked() {
+                                                                researcher.active = !researcher.active;
+                                                                if researcher.active {
+                                                                    println!("[Researcher] ON");
+                                                                } else {
+                                                                    println!("[Researcher] OFF");
+                                                                }
+                                                                if researcher.active {
+                                                                    if let Some(message) = last_msg.clone() {
+                                                                        if last_research.as_ref() != Some(&message) {
+                                                                            println!("[Researcher] Manual trigger for last message ({} chars)", message.len());
+                                                                            self.last_researched_message_by_researcher.lock().unwrap().insert(researcher_id, message.clone());
+                                                                            let researcher_clone = researcher.clone();
+                                                                            let endpoint = self.http_endpoint.clone();
+                                                                            let ctx = ctx.clone();
+                                                                            let handle = self.rt_handle.clone();
+                                                                            let selected_model = if self.selected_ollama_model.trim().is_empty() {
+                                                                                None
+                                                                            } else {
+                                                                                Some(self.selected_ollama_model.clone())
+                                                                            };
+                                                                            handle.spawn(async move {
+                                                                                let topic = if researcher_clone.topic_mode.trim().is_empty() {
+                                                                                    "Articles".to_string()
+                                                                                } else {
+                                                                                    researcher_clone.topic_mode.clone()
+                                                                                };
+                                                                                let generation_instruction = format!(
+                                                                                    "{}\n\nUsing the latest chat message, suggest 3 {} references related to what was said. Keep it concise with bullet points: title and one-line why it matches.",
+                                                                                    researcher_clone.instruction,
+                                                                                    topic.to_lowercase()
+                                                                                );
+                                                                                match crate::adk_integration::send_to_ollama(
+                                                                                    &generation_instruction,
+                                                                                    &message,
+                                                                                    researcher_clone.limit_token,
+                                                                                    &researcher_clone.num_predict,
+                                                                                    selected_model.as_deref(),
+                                                                                ).await {
+                                                                                    Ok(response) => {
+                                                                                        if let Err(e) = crate::http_client::send_researcher_result(
+                                                                                            &endpoint,
+                                                                                            "Agent Researcher",
+                                                                                            &topic,
+                                                                                            &response,
+                                                                                        ).await {
+                                                                                            eprintln!("[Researcher] Failed to send to ams-chat: {}", e);
+                                                                                        } else {
+                                                                                            println!("[Researcher] Sent references to ams-chat [{}]", topic);
+                                                                                        }
+                                                                                    }
+                                                                                    Err(e) => eprintln!("[Researcher] Ollama error: {}", e),
+                                                                                }
+                                                                                ctx.request_repaint();
+                                                                            });
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        });
+                                                    });
+                                                });
+                                            });
+                                            ui.add_space(6.0);
+                                        }
+                                    });
                             });
                         });
                     });
                     ui.add_space(6.0);
                 }
                 
-                // Remove managers and all their owned workers/evaluators
+                // Remove managers and all their owned workers/evaluators/researchers
                 for manager_id in managers_to_remove {
                     let manager_agent_ids: Vec<usize> = self.agents.iter()
                         .filter(|a| a.manager_id == manager_id)
@@ -1006,6 +1272,7 @@ impl eframe::App for MyApp {
                     self.managers.retain(|m| m.id != manager_id);
                     self.agents.retain(|a| a.manager_id != manager_id);
                     self.evaluators.retain(|e| e.manager_id != manager_id);
+                    self.researchers.retain(|r| r.manager_id != manager_id);
                     self.conversation_loop_handles.retain(|(aid, flag, _)| {
                         if manager_agent_ids.contains(aid) {
                             *flag.lock().unwrap() = false;
@@ -1016,12 +1283,15 @@ impl eframe::App for MyApp {
                     });
                 }
 
-                // Remove agents and evaluators that were marked for deletion
+                // Remove agents, evaluators, and researchers that were marked for deletion
                 for id in agents_to_remove {
                     self.agents.retain(|a| a.id != id);
                 }
                 for id in evaluators_to_remove {
                     self.evaluators.retain(|e| e.id != id);
+                }
+                for id in researchers_to_remove {
+                    self.researchers.retain(|r| r.id != id);
                 }
                             });
                     },

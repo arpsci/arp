@@ -134,3 +134,37 @@ pub async fn send_evaluator_result(
     }
     Ok(())
 }
+
+pub async fn send_researcher_result(
+    endpoint: &str,
+    researcher_name: &str,
+    topic: &str,
+    message: &str,
+) -> Result<(), anyhow::Error> {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let timestamp_str = chrono::DateTime::<chrono::Utc>::from_timestamp(timestamp as i64, 0)
+        .unwrap()
+        .to_rfc3339();
+    let payload = EvaluatorResult {
+        evaluator_name: researcher_name.to_string(),
+        sentiment: format!("references:{}", topic.to_lowercase()),
+        message: message.to_string(),
+        timestamp: timestamp_str,
+    };
+    push_outgoing_http_log_line(format!(
+        "POST {} | researcher {} [{}] | {}",
+        endpoint,
+        researcher_name,
+        topic,
+        trim_line(message, 90),
+    ));
+    let client = reqwest::Client::new();
+    let response = client.post(endpoint).json(&payload).send().await?;
+    if !response.status().is_success() {
+        eprintln!("HTTP researcher request failed: {}", response.status());
+    }
+    Ok(())
+}
