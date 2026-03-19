@@ -9,12 +9,12 @@ impl AMSAgents {
         egui::Frame::default()
             .fill(settings_bg_color)
             .inner_margin(egui::Margin {
-                left: 6.0,
-                right: 6.0,
-                top: 6.0,
-                bottom: 6.0,
+                left: 6,
+                right: 6,
+                top: 6,
+                bottom: 6,
             })
-            .rounding(4.0)
+            .corner_radius(4.0)
             .show(ui, |ui| {
                 ui.set_width(available_width);
                 ui.vertical(|ui| {
@@ -25,15 +25,15 @@ impl AMSAgents {
                     let settings_panel = egui::Frame::default()
                         .fill(settings_bg_color)
                         .stroke(egui::Stroke::new(1.0, panel_border_color))
-                        .rounding(4.0)
-                        .inner_margin(egui::Margin::same(6.0));
+                        .corner_radius(4.0)
+                        .inner_margin(egui::Margin::same(6));
 
                     settings_panel.show(ui, |ui| {
                         let subpanel = egui::Frame::default()
                             .fill(settings_bg_color)
                             .stroke(egui::Stroke::new(1.0, panel_border_color))
-                            .rounding(4.0)
-                            .inner_margin(egui::Margin::same(6.0));
+                            .corner_radius(4.0)
+                            .inner_margin(egui::Margin::same(6));
 
                         ui.horizontal_top(|ui| {
                             let total_agents_count = self.managers.len()
@@ -47,20 +47,6 @@ impl AMSAgents {
                                     ui.label(egui::RichText::new("AMSAgents").strong().size(12.0));
                                     ui.add_space(4.0);
                                     ui.label(egui::RichText::new(total_agents_count.to_string()).size(16.0));
-                                    ui.add_space(6.0);
-                                    if ui.button("Create Manager").clicked() {
-                                        let used_ids: std::collections::HashSet<usize> =
-                                            self.managers.iter().map(|m| m.id).collect();
-                                        let mut new_id = 1;
-                                        while used_ids.contains(&new_id) {
-                                            new_id += 1;
-                                        }
-                                        let global_id = self.generate_global_id();
-                                        self.managers.push(crate::agent_entities::AgentManager::new(new_id, global_id));
-                                        if new_id >= self.next_manager_id {
-                                            self.next_manager_id = new_id + 1;
-                                        }
-                                    }
                                 });
                             });
 
@@ -74,7 +60,7 @@ impl AMSAgents {
                                                 self.selected_ollama_model = first.clone();
                                             }
                                         }
-                                        egui::ComboBox::from_id_source("ollama_model_selector")
+                                        egui::ComboBox::from_id_salt("ollama_model_selector")
                                             .selected_text(if self.selected_ollama_model.is_empty() {
                                                 "Select model".to_string()
                                             } else {
