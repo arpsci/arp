@@ -1,14 +1,12 @@
-use eframe::egui;
-use tokio::runtime::Handle;
-use std::sync::{Arc, Mutex};
 use crate::agent_entities::{Agent, AgentManager, Evaluator, Researcher};
 use crate::reproducibility::{RunContext, RunManifest};
+use eframe::egui;
+use std::sync::atomic::AtomicU64;
+use std::sync::{Arc, Mutex};
+use tokio::runtime::Handle;
 
-mod settings_panel;
 mod nodes_panel;
-mod agent_evaluator_node;
-mod agent_researcher_node;
-
+mod settings_panel;
 pub struct AMSAgents {
     rt_handle: Handle,
     ollama_models: Arc<Mutex<Vec<String>>>,
@@ -25,17 +23,23 @@ pub struct AMSAgents {
     conversation_message_events: Arc<Mutex<Vec<String>>>,
     last_evaluated_message_by_evaluator: Arc<Mutex<std::collections::HashMap<usize, String>>>,
     last_researched_message_by_researcher: Arc<Mutex<std::collections::HashMap<usize, String>>>,
-    evaluator_event_queues: Arc<Mutex<std::collections::HashMap<usize, std::collections::VecDeque<(String, String)>>>>,
-    researcher_event_queues: Arc<Mutex<std::collections::HashMap<usize, std::collections::VecDeque<(String, String)>>>>,
+    evaluator_event_queues:
+        Arc<Mutex<std::collections::HashMap<usize, std::collections::VecDeque<(String, String)>>>>,
+    researcher_event_queues:
+        Arc<Mutex<std::collections::HashMap<usize, std::collections::VecDeque<(String, String)>>>>,
     evaluator_inflight_nodes: Arc<Mutex<std::collections::HashSet<usize>>>,
     researcher_inflight_nodes: Arc<Mutex<std::collections::HashSet<usize>>>,
-    conversation_loop_handles: Vec<(usize, Arc<Mutex<bool>>, tokio::task::JoinHandle<()>)>, // (agent_id, active_flag, handle)
+    conversation_loop_handles: Vec<(usize, Arc<Mutex<bool>>, tokio::task::JoinHandle<()>)>,
+    /// Incremented on Stop (and at each run restart) so in-flight Ollama streams can exit promptly.
+    pub(super) ollama_run_epoch: Arc<AtomicU64>,
     current_run_context: Option<RunContext>,
     current_manifest: Option<RunManifest>,
     manifest_export_path: String,
     manifest_import_path: String,
     manifest_status_message: String,
     read_only_replay_mode: bool,
+    /// True after a successful Start until Stop/run_graph failure clears it.
+    conversation_graph_running: bool,
     theme_applied: bool,
     phosphor_fonts_installed: bool,
     nodes_panel: nodes_panel::NodesPanelState,
@@ -43,7 +47,7 @@ pub struct AMSAgents {
 
 impl AMSAgents {
     pub fn new(rt_handle: Handle) -> Self {
-        Self { 
+        Self {
             rt_handle,
             ollama_models: Arc::new(Mutex::new(Vec::new())),
             ollama_models_loading: Arc::new(Mutex::new(false)),
@@ -58,19 +62,25 @@ impl AMSAgents {
                 .unwrap_or_else(|_| "http://localhost:3000/".to_string()),
             last_message_in_chat: Arc::new(Mutex::new(None)),
             conversation_message_events: Arc::new(Mutex::new(Vec::new())),
-            last_evaluated_message_by_evaluator: Arc::new(Mutex::new(std::collections::HashMap::new())),
-            last_researched_message_by_researcher: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            last_evaluated_message_by_evaluator: Arc::new(Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            last_researched_message_by_researcher: Arc::new(Mutex::new(
+                std::collections::HashMap::new(),
+            )),
             evaluator_event_queues: Arc::new(Mutex::new(std::collections::HashMap::new())),
             researcher_event_queues: Arc::new(Mutex::new(std::collections::HashMap::new())),
             evaluator_inflight_nodes: Arc::new(Mutex::new(std::collections::HashSet::new())),
             researcher_inflight_nodes: Arc::new(Mutex::new(std::collections::HashSet::new())),
             conversation_loop_handles: Vec::new(),
+            ollama_run_epoch: Arc::new(AtomicU64::new(0)),
             current_run_context: None,
             current_manifest: None,
             manifest_export_path: "runs/exported-manifest.json".to_string(),
             manifest_import_path: "runs/import-manifest.json".to_string(),
             manifest_status_message: String::new(),
             read_only_replay_mode: false,
+            conversation_graph_running: false,
             theme_applied: false,
             phosphor_fonts_installed: false,
             nodes_panel: nodes_panel::NodesPanelState::default(),
@@ -91,14 +101,18 @@ impl eframe::App for AMSAgents {
             self.phosphor_fonts_installed = true;
         }
         // Auto-refresh model list on startup
-        if self.ollama_models.lock().unwrap().is_empty() && !*self.ollama_models_loading.lock().unwrap() {
+        if self.ollama_models.lock().unwrap().is_empty()
+            && !*self.ollama_models_loading.lock().unwrap()
+        {
             *self.ollama_models_loading.lock().unwrap() = true;
             let models_arc = self.ollama_models.clone();
             let loading_arc = self.ollama_models_loading.clone();
             let ctx = ctx.clone();
             let handle = self.rt_handle.clone();
             handle.spawn(async move {
-                let models = crate::adk_integration::fetch_ollama_models().await.unwrap_or_default();
+                let models = crate::adk_integration::fetch_ollama_models()
+                    .await
+                    .unwrap_or_default();
                 *models_arc.lock().unwrap() = models;
                 *loading_arc.lock().unwrap() = false;
                 ctx.request_repaint();
@@ -135,4 +149,3 @@ impl eframe::App for AMSAgentsApp {
         eframe::App::update(&mut self.ams_agents, ctx, frame);
     }
 }
-

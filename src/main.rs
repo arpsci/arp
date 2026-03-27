@@ -6,7 +6,7 @@ fn main() -> eframe::Result<()> {
     // Create a Tokio runtime for async operations
     let rt = Arc::new(Runtime::new().expect("Failed to create Tokio runtime"));
     let rt_handle = rt.handle().clone();
-    
+
     // Keep the runtime alive by storing it
     std::thread::spawn(move || {
         rt.block_on(async {

@@ -8,6 +8,7 @@ use futures_util::StreamExt;
 use serde::Deserialize;
 use std::io::Write;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const APP_NAME: &str = "ams-agents";
 const USER_ID: &str = "user1";
@@ -92,6 +93,7 @@ pub(crate) async fn run_prompt_streaming(
     runner_ctx: RunnerContext,
     input: &str,
     print_response_prefix: bool,
+    stop_epoch: Option<(Arc<AtomicU64>, u64)>,
 ) -> Result<String> {
     let user_content = Content::new("user").with_text(input);
     let mut stream = runner_ctx
@@ -106,6 +108,12 @@ pub(crate) async fn run_prompt_streaming(
     }
 
     while let Some(event_result) = stream.next().await {
+        if let Some((ref epoch, caught)) = stop_epoch {
+            if epoch.load(Ordering::SeqCst) != caught {
+                println!("\n[Ollama inference stopped by user]");
+                return Err(anyhow::anyhow!(super::OLLAMA_STOPPED_MSG));
+            }
+        }
         match event_result {
             Ok(event) => {
                 if let Some(content) = event.llm_response.content.as_ref() {

@@ -1,7 +1,7 @@
-use serde::{Serialize, Deserialize};
+use crate::reproducibility::RunContext;
+use serde::{Deserialize, Serialize};
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
-use crate::reproducibility::RunContext;
 
 static OUTGOING_HTTP_LOG: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
 
@@ -61,11 +61,11 @@ pub async fn send_conversation_message(
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    
+
     let timestamp_str = chrono::DateTime::<chrono::Utc>::from_timestamp(timestamp as i64, 0)
         .unwrap()
         .to_rfc3339();
-    
+
     let payload = ConversationMessage {
         sender_id,
         sender_name: sender_name.to_string(),
@@ -86,18 +86,14 @@ pub async fn send_conversation_message(
         receiver_name,
         trim_line(message, 90),
     ));
-    
+
     let client = reqwest::Client::new();
-    let response = client
-        .post(endpoint)
-        .json(&payload)
-        .send()
-        .await?;
-    
+    let response = client.post(endpoint).json(&payload).send().await?;
+
     if !response.status().is_success() {
         eprintln!("HTTP request failed: {}", response.status());
     }
-    
+
     Ok(())
 }
 

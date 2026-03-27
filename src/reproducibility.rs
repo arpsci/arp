@@ -119,10 +119,13 @@ pub fn run_dir(base_dir: &Path, experiment_id: &str, run_id: &str) -> PathBuf {
 
 pub fn write_manifest(base_dir: &Path, manifest: &RunManifest) -> Result<PathBuf> {
     let dir = run_dir(base_dir, &manifest.experiment_id, &manifest.run_id);
-    fs::create_dir_all(&dir).with_context(|| format!("failed to create run dir: {}", dir.display()))?;
+    fs::create_dir_all(&dir)
+        .with_context(|| format!("failed to create run dir: {}", dir.display()))?;
     let path = dir.join("manifest.json");
-    let json = serde_json::to_string_pretty(manifest).context("failed to serialize run manifest")?;
-    fs::write(&path, json).with_context(|| format!("failed to write manifest: {}", path.display()))?;
+    let json =
+        serde_json::to_string_pretty(manifest).context("failed to serialize run manifest")?;
+    fs::write(&path, json)
+        .with_context(|| format!("failed to write manifest: {}", path.display()))?;
     Ok(path)
 }
 
@@ -131,7 +134,8 @@ pub fn export_manifest_to(manifest: &RunManifest, target_path: &Path) -> Result<
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create export parent dir: {}", parent.display()))?;
     }
-    let json = serde_json::to_string_pretty(manifest).context("failed to serialize manifest for export")?;
+    let json = serde_json::to_string_pretty(manifest)
+        .context("failed to serialize manifest for export")?;
     fs::write(target_path, json)
         .with_context(|| format!("failed to export manifest to {}", target_path.display()))?;
     Ok(())

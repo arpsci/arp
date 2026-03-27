@@ -3,7 +3,11 @@ use eframe::egui;
 use std::path::PathBuf;
 
 impl AMSAgents {
-    pub(super) fn render_ollama_settings_widgets(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+    pub(super) fn render_ollama_settings_widgets(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+    ) {
         ui.vertical(|ui| {
             let total_agents_count = self.managers.len()
                 + self.agents.len()
@@ -38,7 +42,11 @@ impl AMSAgents {
                     });
 
                 let loading = *self.ollama_models_loading.lock().unwrap();
-                if ui.button(if loading { "Loading" } else { "Refresh" }).clicked() && !loading {
+                if ui
+                    .button(if loading { "Loading" } else { "Refresh" })
+                    .clicked()
+                    && !loading
+                {
                     *self.ollama_models_loading.lock().unwrap() = true;
                     let models_arc = self.ollama_models.clone();
                     let loading_arc = self.ollama_models_loading.clone();
@@ -58,9 +66,7 @@ impl AMSAgents {
 
             ui.horizontal(|ui| {
                 ui.label("Chat HTTP Endpoint:");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.http_endpoint).desired_width(260.0),
-                );
+                ui.add(egui::TextEdit::singleline(&mut self.http_endpoint).desired_width(260.0));
             });
             ui.add_space(5.0);
 
@@ -71,13 +77,11 @@ impl AMSAgents {
                     let handle = self.rt_handle.clone();
                     let model = self.selected_ollama_model.clone();
                     handle.spawn(async move {
-                        match crate::adk_integration::test_ollama(
-                            if model.trim().is_empty() {
-                                None
-                            } else {
-                                Some(model.as_str())
-                            },
-                        )
+                        match crate::adk_integration::test_ollama(if model.trim().is_empty() {
+                            None
+                        } else {
+                            Some(model.as_str())
+                        })
                         .await
                         {
                             Ok(_) => {}
@@ -112,8 +116,7 @@ impl AMSAgents {
             ui.horizontal(|ui| {
                 ui.label("Export Manifest Path:");
                 ui.add(
-                    egui::TextEdit::singleline(&mut self.manifest_export_path)
-                        .desired_width(300.0),
+                    egui::TextEdit::singleline(&mut self.manifest_export_path).desired_width(300.0),
                 );
                 if ui.button("Export Manifest").clicked() {
                     let export_path = PathBuf::from(self.manifest_export_path.clone());
@@ -125,8 +128,7 @@ impl AMSAgents {
             ui.horizontal(|ui| {
                 ui.label("Run From Manifest Path:");
                 ui.add(
-                    egui::TextEdit::singleline(&mut self.manifest_import_path)
-                        .desired_width(300.0),
+                    egui::TextEdit::singleline(&mut self.manifest_import_path).desired_width(300.0),
                 );
                 if ui.button("Run From Manifest").clicked() {
                     let import_path = PathBuf::from(self.manifest_import_path.clone());

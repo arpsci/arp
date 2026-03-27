@@ -1,16 +1,14 @@
 use super::AMSAgents;
 use crate::reproducibility::{
-    GraphSnapshot, ManifestEdge, ManifestNode, RunContext, RunManifest, RunRuntimeSettings, APP_NAME,
-    MANIFEST_VERSION, canonical_graph_signature, derive_experiment_id, export_manifest_to, new_run_id,
-    now_rfc3339_utc, read_manifest, runs_root, write_manifest,
+    APP_NAME, GraphSnapshot, MANIFEST_VERSION, ManifestEdge, ManifestNode, RunContext, RunManifest,
+    RunRuntimeSettings, canonical_graph_signature, derive_experiment_id, export_manifest_to,
+    new_run_id, now_rfc3339_utc, read_manifest, runs_root, write_manifest,
 };
 use eframe::egui;
 use egui_phosphor::regular;
 use rand::Rng;
-use egui_snarl::ui::{PinInfo, SnarlViewer};
-use egui_snarl::{InPin, InPinId, NodeId, OutPin, OutPinId, Snarl};
-use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 /// Preset topic labels and short conversation prompts (ethical, discussion-oriented).
@@ -61,17 +59,9 @@ const TOPIC_PRESETS: &[(&str, &str)] = &[
 enum AgentNodeKind {
     Manager,
     Worker,
-    Conversation,
     Evaluator,
     Researcher,
     Topic,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum NodeCategory {
-    Agent,
-    Tool,
-    Output,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -82,48 +72,21 @@ enum PanelTab {
     Settings,
 }
 
+#[derive(Clone, Copy)]
+enum EvaluatorAgentsPick {
+    Unassigned,
+    AllWorkers,
+    Worker(usize),
+}
+
 impl AgentNodeKind {
     fn label(&self) -> &'static str {
         match self {
             AgentNodeKind::Manager => "Agent Manager",
             AgentNodeKind::Worker => "Agent Worker",
-            AgentNodeKind::Conversation => "Conversation",
             AgentNodeKind::Evaluator => "Agent Evaluator",
             AgentNodeKind::Researcher => "Agent Researcher",
             AgentNodeKind::Topic => "Topic",
-        }
-    }
-
-    fn category(&self) -> NodeCategory {
-        match self {
-            AgentNodeKind::Manager
-            | AgentNodeKind::Worker
-            | AgentNodeKind::Evaluator
-            | AgentNodeKind::Researcher => NodeCategory::Agent,
-            AgentNodeKind::Topic => NodeCategory::Tool,
-            AgentNodeKind::Conversation => NodeCategory::Output,
-        }
-    }
-
-    fn inputs(&self) -> usize {
-        match self {
-            AgentNodeKind::Manager => 0,
-            AgentNodeKind::Worker => 2,
-            AgentNodeKind::Conversation => 2,
-            AgentNodeKind::Evaluator => 1,   // worker only
-            AgentNodeKind::Researcher => 1,  // worker only
-            AgentNodeKind::Topic => 0,
-        }
-    }
-
-    fn outputs(&self) -> usize {
-        match self {
-            AgentNodeKind::Manager => 1,
-            AgentNodeKind::Worker => 1,
-            AgentNodeKind::Conversation => 0, // output node: terminal
-            AgentNodeKind::Evaluator => 0,
-            AgentNodeKind::Researcher => 0,
-            AgentNodeKind::Topic => 1,
         }
     }
 }
@@ -146,11 +109,11 @@ struct NodeWorkerData {
     conversation_topic: String,
     conversation_topic_source: String,
 
-    // Inferred from graph wires (Manager -> Worker)
-    manager_node: Option<NodeId>,
+    /// Selected manager agent id (row model; no graph wires).
+    manager_node: Option<usize>,
 
-    // Inferred from graph wires (Topic -> Worker)
-    topic_node: Option<NodeId>,
+    /// Optional topic tool agent id.
+    topic_node: Option<usize>,
 }
 
 #[derive(Clone)]
@@ -166,10 +129,11 @@ struct NodeEvaluatorData {
 
     active: bool,
 
-    // Inferred from graph wires (Worker -> Evaluator -> Manager)
-    worker_node: Option<NodeId>,
-    manager_node: Option<NodeId>,
+    /// When true, evaluate on traffic from all workers (no specific pin); pin 1 stays empty.
+    evaluate_all_workers: bool,
 
+    worker_node: Option<usize>,
+    manager_node: Option<usize>,
 }
 
 #[derive(Clone)]
@@ -185,10 +149,8 @@ struct NodeResearcherData {
 
     active: bool,
 
-    // Inferred from graph wires (Worker -> Researcher -> Manager)
-    worker_node: Option<NodeId>,
-    manager_node: Option<NodeId>,
-
+    worker_node: Option<usize>,
+    manager_node: Option<usize>,
 }
 
 #[derive(Clone)]
@@ -201,25 +163,9 @@ struct NodeTopicData {
 }
 
 #[derive(Clone)]
-struct NodeConversationData {
-    name: String,
-    global_id: String,
-
-    /// "Dialogue" = two workers (back-and-forth), "Monologue" = one worker (single-agent).
-    conversation_mode: String,
-
-    /// Inferred: Worker out → this node's input 0 / 1.
-    worker_a_node: Option<NodeId>,
-    worker_b_node: Option<NodeId>,
-
-    conversation_active: bool,
-}
-
-#[derive(Clone)]
 enum NodePayload {
     Manager(NodeManagerData),
     Worker(NodeWorkerData),
-    Conversation(NodeConversationData),
     Evaluator(NodeEvaluatorData),
     Researcher(NodeResearcherData),
     Topic(NodeTopicData),
@@ -278,22 +224,6 @@ impl NodeData {
         }
     }
 
-    fn new_conversation() -> Self {
-        let global_id = Self::new_global_id();
-        Self {
-            kind: AgentNodeKind::Conversation,
-            label: AgentNodeKind::Conversation.label().to_string(),
-            payload: NodePayload::Conversation(NodeConversationData {
-                name: AgentNodeKind::Conversation.label().to_string(),
-                global_id,
-                conversation_mode: "Monologue".to_string(),
-                worker_a_node: None,
-                worker_b_node: None,
-                conversation_active: false,
-            }),
-        }
-    }
-
     fn new_evaluator() -> Self {
         let global_id = Self::new_global_id();
         Self {
@@ -307,6 +237,7 @@ impl NodeData {
                 limit_token: false,
                 num_predict: String::new(),
                 active: false,
+                evaluate_all_workers: false,
                 worker_node: None,
                 manager_node: None,
             }),
@@ -350,7 +281,6 @@ impl NodeData {
         match &mut self.payload {
             NodePayload::Manager(m) => m.name = name,
             NodePayload::Worker(w) => w.name = name,
-            NodePayload::Conversation(c) => c.name = name,
             NodePayload::Evaluator(e) => e.name = name,
             NodePayload::Researcher(r) => r.name = name,
             NodePayload::Topic(t) => t.name = name,
@@ -358,20 +288,64 @@ impl NodeData {
     }
 }
 
+/// One row in the Agents list (stable `id` for manifests and conversation loops).
+#[derive(Clone)]
+pub(super) struct AgentRecord {
+    pub id: usize,
+    pub position: egui::Pos2,
+    pub open: bool,
+    pub data: NodeData,
+}
+
 pub(super) struct NodesPanelState {
-    snarl: Snarl<NodeData>,
+    pub(super) next_agent_id: usize,
+    pub(super) agents: Vec<AgentRecord>,
     selected_add_kind: AgentNodeKind,
     active_tab: PanelTab,
 }
 
 impl Default for NodesPanelState {
     fn default() -> Self {
-        let snarl = Snarl::new();
         Self {
-            snarl,
+            next_agent_id: 0,
+            agents: Vec::new(),
             selected_add_kind: AgentNodeKind::Worker,
             active_tab: PanelTab::Overview,
         }
+    }
+}
+
+impl NodesPanelState {
+    fn push_agent(&mut self, pos: egui::Pos2, data: NodeData) -> usize {
+        let id = self.next_agent_id;
+        self.next_agent_id += 1;
+        self.agents.push(AgentRecord {
+            id,
+            position: pos,
+            open: true,
+            data,
+        });
+        id
+    }
+
+    fn insert_agent_with_id(&mut self, id: usize, pos: egui::Pos2, open: bool, data: NodeData) {
+        self.agents.push(AgentRecord {
+            id,
+            position: pos,
+            open,
+            data,
+        });
+        if id + 1 > self.next_agent_id {
+            self.next_agent_id = id + 1;
+        }
+    }
+
+    fn remove_agent(&mut self, id: usize) {
+        self.agents.retain(|a| a.id != id);
+    }
+
+    fn agent_by_id_mut(&mut self, id: usize) -> Option<&mut AgentRecord> {
+        self.agents.iter_mut().find(|a| a.id == id)
     }
 }
 
@@ -379,115 +353,26 @@ impl Default for NodesPanelState {
 struct BasicNodeViewer;
 
 impl BasicNodeViewer {
-    fn numbered_name_for_kind(snarl: &Snarl<NodeData>, kind: AgentNodeKind) -> String {
-        let idx = snarl
-            .nodes_ids_data()
-            .filter(|(_, n)| n.value.kind == kind)
-            .count()
-            + 1;
+    fn numbered_name_for_kind(agents: &[AgentRecord], kind: AgentNodeKind) -> String {
+        let idx = agents.iter().filter(|a| a.data.kind == kind).count() + 1;
         format!("{} {}", kind.label(), idx)
     }
 }
 
-impl SnarlViewer<NodeData> for BasicNodeViewer {
-    fn title(&mut self, node: &NodeData) -> String {
-        node.label.clone()
-    }
-
-    fn inputs(&mut self, _node: &NodeData) -> usize {
-        _node.kind.inputs()
-    }
-
-    fn show_input(
-        &mut self,
-        _pin: &InPin,
-        ui: &mut egui::Ui,
-        _snarl: &mut Snarl<NodeData>,
-    ) -> impl egui_snarl::ui::SnarlPin + 'static {
-        let node_kind = _snarl
-            .get_node(_pin.id.node)
-            .map(|n| n.kind)
-            .unwrap_or(AgentNodeKind::Manager);
-
-        match node_kind {
-            AgentNodeKind::Worker => {
-                if _pin.id.input == 0 {
-                    ui.label("manager");
-                } else if _pin.id.input == 1 {
-                    ui.label("topic");
-                } else {
-                    ui.label("in");
-                }
-            }
-            AgentNodeKind::Conversation => {
-                if _pin.id.input == 0 {
-                    ui.label("A");
-                } else if _pin.id.input == 1 {
-                    ui.label("B");
-                } else {
-                    ui.label("in");
-                }
-            }
-            AgentNodeKind::Evaluator => {
-                if _pin.id.input == 0 {
-                    ui.label("worker");
-                } else {
-                    ui.label("in");
-                }
-            }
-            AgentNodeKind::Researcher => {
-                if _pin.id.input == 0 {
-                    ui.label("worker");
-                } else {
-                    ui.label("in");
-                }
-            }
-            _ => {
-                ui.label("in");
-            }
-        }
-        PinInfo::circle()
-    }
-
-    fn outputs(&mut self, node: &NodeData) -> usize {
-        node.kind.outputs()
-    }
-
-    fn show_output(
-        &mut self,
-        _pin: &OutPin,
-        ui: &mut egui::Ui,
-        _snarl: &mut Snarl<NodeData>,
-    ) -> impl egui_snarl::ui::SnarlPin + 'static {
-        ui.label("out");
-        PinInfo::circle()
-    }
-
-    fn has_body(&mut self, _node: &NodeData) -> bool {
-        true
-    }
-
-    fn show_body(
-        &mut self,
-        node: NodeId,
-        inputs: &[InPin],
-        _outputs: &[OutPin],
-        ui: &mut egui::Ui,
-        snarl: &mut Snarl<NodeData>,
-    ) {
-        let node_kind = snarl.get_node(node).unwrap().kind.clone();
-
-        match node_kind {
+impl BasicNodeViewer {
+    fn show_body(&mut self, id: usize, ui: &mut egui::Ui, agents: &mut [AgentRecord]) {
+        let Some(idx) = agents.iter().position(|a| a.id == id) else {
+            return;
+        };
+        match agents[idx].data.kind {
             AgentNodeKind::Manager => {
                 // Make manager node slightly wider than others.
                 {
-                    let node_mut = snarl.get_node_mut(node).unwrap();
-                    let manager_data = match &mut node_mut.payload {
+                    let manager_data = match &mut agents[idx].data.payload {
                         NodePayload::Manager(m) => m,
                         _ => unreachable!("kind mismatch"),
                     };
                     ui.vertical(|ui| {
-
                         ui.horizontal(|ui| {
                             ui.label("Name:");
                             ui.add(egui::TextEdit::singleline(&mut manager_data.name));
@@ -498,11 +383,11 @@ impl SnarlViewer<NodeData> for BasicNodeViewer {
                 }
             }
             AgentNodeKind::Worker => {
-                let mut managers: Vec<(NodeId, String)> = snarl
-                    .nodes_ids_data()
-                    .filter_map(|(id, n)| {
-                        if let NodePayload::Manager(m) = &n.value.payload {
-                            Some((id, m.name.clone()))
+                let mut managers: Vec<(usize, String)> = agents
+                    .iter()
+                    .filter_map(|a| {
+                        if let NodePayload::Manager(m) = &a.data.payload {
+                            Some((a.id, m.name.clone()))
                         } else {
                             None
                         }
@@ -510,22 +395,14 @@ impl SnarlViewer<NodeData> for BasicNodeViewer {
                     .collect();
                 managers.sort_by(|a, b| a.1.cmp(&b.1));
 
-                let my_manager_node = inputs
-                    .get(0)
-                    .and_then(|pin| pin.remotes.first())
-                    .map(|out_pin_id| out_pin_id.node);
+                let my_manager_node = match &agents[idx].data.payload {
+                    NodePayload::Worker(w) => w.manager_node,
+                    _ => None,
+                };
 
-                if let Some(node_mut) = snarl.get_node_mut(node) {
-                    if let NodePayload::Worker(w) = &mut node_mut.payload {
-                        w.manager_node = my_manager_node;
-                        w.topic_node = None;
-                    }
-                }
-
-                let mut pending_manager_pick: Option<Option<NodeId>> = None;
+                let mut pending_manager_pick: Option<Option<usize>> = None;
                 {
-                    let node_mut = snarl.get_node_mut(node).unwrap();
-                    let worker_data = match &mut node_mut.payload {
+                    let worker_data = match &mut agents[idx].data.payload {
                         NodePayload::Worker(w) => w,
                         _ => unreachable!("kind mismatch"),
                     };
@@ -541,7 +418,7 @@ impl SnarlViewer<NodeData> for BasicNodeViewer {
                                         .map(|(_, n)| n.clone())
                                 })
                                 .unwrap_or_else(|| "Unassigned".to_string());
-                            egui::ComboBox::from_id_salt(ui.id().with(node.0).with("manager_pick"))
+                            egui::ComboBox::from_id_salt(ui.id().with(id).with("manager_pick"))
                                 .selected_text(selected_text)
                                 .show_ui(ui, |ui| {
                                     if ui
@@ -575,7 +452,7 @@ impl SnarlViewer<NodeData> for BasicNodeViewer {
                             ui.horizontal(|ui| {
                                 ui.label("Instruction:");
                                 egui::ComboBox::from_id_salt(
-                                    ui.id().with(node.0).with("instruction_mode"),
+                                    ui.id().with(id).with("instruction_mode"),
                                 )
                                 .selected_text(if worker_data.instruction_mode.is_empty() {
                                     "Select".to_string()
@@ -625,7 +502,7 @@ impl SnarlViewer<NodeData> for BasicNodeViewer {
                         ui.horizontal(|ui| {
                             ui.label("Topic:");
                             egui::ComboBox::from_id_salt(
-                                ui.id().with(node.0).with("worker_topic_analysis_mode"),
+                                ui.id().with(id).with("worker_topic_analysis_mode"),
                             )
                             .selected_text(if worker_data.analysis_mode.is_empty() {
                                 "Select".to_string()
@@ -652,492 +529,452 @@ impl SnarlViewer<NodeData> for BasicNodeViewer {
                         });
 
                         ui.separator();
-                        ui.horizontal(|ui| {
-                            if ui.button("Status").clicked() {
-                                println!("=== Worker Node {:?} Status ===", node);
-                                println!("Global ID: {}", worker_data.global_id);
-                                println!("Manager node: {:?}", worker_data.manager_node);
-                                println!("Name: {}", worker_data.name);
-                            }
-                        });
-                        ui.separator();
                     });
                 }
 
                 if let Some(pick) = pending_manager_pick {
-                    let in_pin = InPinId {
-                        node,
-                        input: 0,
-                    };
-                    snarl.drop_inputs(in_pin);
-                    if let Some(mgr_id) = pick {
-                        snarl.connect(
-                            OutPinId {
-                                node: mgr_id,
-                                output: 0,
-                            },
-                            in_pin,
-                        );
+                    if let NodePayload::Worker(w) = &mut agents[idx].data.payload {
+                        w.manager_node = pick;
                     }
-                }
-            }
-            AgentNodeKind::Conversation => {
-                let worker_a = inputs
-                    .get(0)
-                    .and_then(|pin| pin.remotes.first())
-                    .map(|out_pin_id| out_pin_id.node);
-                let worker_b = inputs
-                    .get(1)
-                    .and_then(|pin| pin.remotes.first())
-                    .map(|out_pin_id| out_pin_id.node);
-
-                let mut connected_workers: Vec<NodeId> = Vec::new();
-                if let Some(w) = worker_a {
-                    connected_workers.push(w);
-                }
-                if let Some(w) = worker_b {
-                    if !connected_workers.contains(&w) {
-                        connected_workers.push(w);
-                    }
-                }
-                let inferred_mode = if connected_workers.len() >= 2 {
-                    "Dialogue"
-                } else {
-                    "Monologue"
-                };
-                let worker_a = connected_workers.first().copied();
-                let worker_b = connected_workers.get(1).copied();
-
-                let worker_a_name = worker_a
-                    .and_then(|wid| snarl.get_node(wid))
-                    .and_then(|nd| match &nd.payload {
-                        NodePayload::Worker(w) => Some(w.name.clone()),
-                        _ => None,
-                    })
-                    .unwrap_or_else(|| "—".to_string());
-                let worker_b_name = worker_b
-                    .and_then(|wid| snarl.get_node(wid))
-                    .and_then(|nd| match &nd.payload {
-                        NodePayload::Worker(w) => Some(w.name.clone()),
-                        _ => None,
-                    })
-                    .unwrap_or_else(|| "—".to_string());
-
-                let (a_topic_ok, b_topic_ok) = (
-                    worker_a
-                        .and_then(|wid| snarl.get_node(wid))
-                        .and_then(|nd| match &nd.payload {
-                            NodePayload::Worker(w) => {
-                                Some(!w.conversation_topic.trim().is_empty())
-                            }
-                            _ => None,
-                        })
-                        .unwrap_or(false),
-                    worker_b
-                        .and_then(|wid| snarl.get_node(wid))
-                        .and_then(|nd| match &nd.payload {
-                            NodePayload::Worker(w) => {
-                                Some(!w.conversation_topic.trim().is_empty())
-                            }
-                            _ => None,
-                        })
-                        .unwrap_or(false),
-                );
-
-                if let Some(node_mut) = snarl.get_node_mut(node) {
-                    if let NodePayload::Conversation(c) = &mut node_mut.payload {
-                        c.worker_a_node = worker_a;
-                        c.worker_b_node = worker_b;
-                        c.conversation_mode = inferred_mode.to_string();
-                    }
-                }
-
-                {
-                    let node_mut = snarl.get_node_mut(node).unwrap();
-                    let conv = match &mut node_mut.payload {
-                        NodePayload::Conversation(c) => c,
-                        _ => unreachable!("kind mismatch"),
-                    };
-
-                    ui.vertical(|ui| {
-                        ui.separator();
-                        ui.horizontal(|ui| {
-                            ui.label("Name:");
-                            ui.add(egui::TextEdit::singleline(&mut conv.name));
-                        });
-                        ui.separator();
-
-                        ui.horizontal(|ui| {
-                            ui.label("Agent A:");
-                            ui.label(egui::RichText::new(&worker_a_name).weak());
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("Agent B:");
-                            ui.label(egui::RichText::new(&worker_b_name).weak());
-                        });
-
-                        ui.horizontal(|ui| {
-                            ui.label("Mode:");
-                            ui.label(egui::RichText::new(inferred_mode).weak());
-                        });
-
-                        ui.small(
-                            egui::RichText::new(
-                                "Connect Worker nodes to Evaluator/Researcher independently to auto-enable each one.",
-                            )
-                            .weak()
-                            .size(10.0),
-                        );
-
-                        let can_start = (inferred_mode == "Monologue"
-                            && worker_a.is_some()
-                            && a_topic_ok)
-                            || (inferred_mode == "Dialogue"
-                                && worker_a.is_some()
-                                && worker_b.is_some()
-                                && a_topic_ok
-                                && b_topic_ok);
-
-                        ui.separator();
-                        ui.horizontal(|ui| {
-                            ui.label(if conv.conversation_active {
-                                egui::RichText::new("Status: Running").weak()
-                            } else {
-                                egui::RichText::new("Status: Stopped").weak()
-                            });
-                        });
-
-                        if !can_start && !conv.conversation_active {
-                            ui.small(
-                                egui::RichText::new(
-                                    "Monologue: wire A + Topic on A. Dialogue: wire A & B + topics.",
-                                )
-                                .weak()
-                                .size(10.0),
-                            );
-                        }
-
-                        ui.separator();
-                    });
                 }
             }
             AgentNodeKind::Evaluator => {
-                let my_worker_node = inputs
-                    .get(0)
-                    .and_then(|pin| pin.remotes.first())
-                    .map(|out_pin_id| out_pin_id.node);
-
-                let inferred_manager_node = my_worker_node
-                    .and_then(|wn| snarl.get_node(wn))
-                    .and_then(|nd| match &nd.payload {
-                        NodePayload::Worker(w) => w.manager_node,
-                        _ => None,
-                    });
-
-                let manager_name = inferred_manager_node
-                    .and_then(|mid| snarl.get_node(mid))
-                    .and_then(|nd| match &nd.payload {
-                        NodePayload::Manager(m) => Some(m.name.clone()),
-                        _ => None,
+                let mut managers: Vec<(usize, String)> = agents
+                    .iter()
+                    .filter_map(|a| {
+                        if let NodePayload::Manager(m) = &a.data.payload {
+                            Some((a.id, m.name.clone()))
+                        } else {
+                            None
+                        }
                     })
-                    .unwrap_or_else(|| "Unassigned".to_string());
+                    .collect();
+                managers.sort_by(|a, b| a.1.cmp(&b.1));
 
-                // Update inferred wire relationships.
-                if let Some(node_mut) = snarl.get_node_mut(node) {
-                    if let NodePayload::Evaluator(e) = &mut node_mut.payload {
-                        e.worker_node = my_worker_node;
-                        e.manager_node = inferred_manager_node;
-                        // Connected to a Worker node => behaves like clicking "Evaluate".
-                        e.active = my_worker_node.is_some();
-                    }
-                }
+                let mut workers: Vec<(usize, String)> = agents
+                    .iter()
+                    .filter_map(|a| {
+                        if let NodePayload::Worker(w) = &a.data.payload {
+                            Some((a.id, w.name.clone()))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                workers.sort_by(|a, b| a.1.cmp(&b.1));
+
+                let (my_manager_node, my_eval_worker_pin) = match &agents[idx].data.payload {
+                    NodePayload::Evaluator(e) => (e.manager_node, e.worker_node),
+                    _ => (None, None),
+                };
+
+                let mut pending_manager_pick: Option<Option<usize>> = None;
+                let mut pending_agents_pick: Option<EvaluatorAgentsPick> = None;
 
                 {
-                    let node_mut = snarl.get_node_mut(node).unwrap();
-                    let evaluator_data = match &mut node_mut.payload {
+                    let evaluator_data = match &mut agents[idx].data.payload {
                         NodePayload::Evaluator(e) => e,
                         _ => unreachable!("kind mismatch"),
                     };
 
                     ui.vertical(|ui| {
-                            ui.separator();
-                            AMSAgents::render_agent_evaluator_header(
-                                ui,
-                                &manager_name,
-                            );
-                            ui.separator();
-
-                            ui.horizontal(|ui| {
-                                ui.label("Name:");
-                                ui.add(egui::TextEdit::singleline(
-                                    &mut evaluator_data.name,
-                                ));
-                            });
-
-                            ui.horizontal(|ui| {
-                                ui.label("Analysis:");
-                                egui::ComboBox::from_id_salt(
-                                    ui.id().with(node.0).with(
-                                        "eval_analysis_mode",
-                                    ),
-                                )
-                                .selected_text(if evaluator_data
-                                    .analysis_mode
-                                    .is_empty()
+                        ui.horizontal(|ui| {
+                            ui.label("Manager:");
+                            let selected_text = my_manager_node
+                                .and_then(|mid| {
+                                    managers
+                                        .iter()
+                                        .find(|(id, _)| *id == mid)
+                                        .map(|(_, n)| n.clone())
+                                })
+                                .unwrap_or_else(|| "Unassigned".to_string());
+                            egui::ComboBox::from_id_salt(
+                                ui.id().with(id).with("eval_manager_pick"),
+                            )
+                            .selected_text(selected_text)
+                            .show_ui(ui, |ui| {
+                                if ui
+                                    .selectable_label(my_manager_node.is_none(), "Unassigned")
+                                    .clicked()
                                 {
+                                    pending_manager_pick = Some(None);
+                                }
+                                for &(mgr_id, ref mgr_name) in &managers {
+                                    if ui
+                                        .selectable_label(
+                                            my_manager_node == Some(mgr_id),
+                                            mgr_name.as_str(),
+                                        )
+                                        .clicked()
+                                    {
+                                        pending_manager_pick = Some(Some(mgr_id));
+                                    }
+                                }
+                            });
+                        });
+
+                        ui.horizontal(|ui| {
+                            ui.label("Agents to Evaluate:");
+                            let selected_text = if evaluator_data.evaluate_all_workers {
+                                "All Workers".to_string()
+                            } else {
+                                my_eval_worker_pin
+                                    .and_then(|wid| {
+                                        workers
+                                            .iter()
+                                            .find(|(id, _)| *id == wid)
+                                            .map(|(_, n)| n.clone())
+                                    })
+                                    .unwrap_or_else(|| "Unassigned".to_string())
+                            };
+                            egui::ComboBox::from_id_salt(
+                                ui.id().with(id).with("eval_agents_pick"),
+                            )
+                            .selected_text(selected_text)
+                            .show_ui(ui, |ui| {
+                                let unassigned_sel = !evaluator_data.evaluate_all_workers
+                                    && my_eval_worker_pin.is_none();
+                                if ui.selectable_label(unassigned_sel, "Unassigned").clicked() {
+                                    pending_agents_pick = Some(EvaluatorAgentsPick::Unassigned);
+                                }
+                                let all_sel = evaluator_data.evaluate_all_workers;
+                                if ui.selectable_label(all_sel, "All Workers").clicked() {
+                                    pending_agents_pick = Some(EvaluatorAgentsPick::AllWorkers);
+                                }
+                                for &(worker_id, ref worker_name) in &workers {
+                                    let sel = !evaluator_data.evaluate_all_workers
+                                        && my_eval_worker_pin == Some(worker_id);
+                                    if ui
+                                        .selectable_label(sel, worker_name.as_str())
+                                        .clicked()
+                                    {
+                                        pending_agents_pick =
+                                            Some(EvaluatorAgentsPick::Worker(worker_id));
+                                    }
+                                }
+                            });
+                        });
+
+                        ui.separator();
+
+                        ui.horizontal(|ui| {
+                            ui.label("Name:");
+                            ui.add(egui::TextEdit::singleline(&mut evaluator_data.name));
+                        });
+
+                        ui.horizontal(|ui| {
+                            ui.label("Analysis:");
+                            egui::ComboBox::from_id_salt(
+                                ui.id().with(id).with("eval_analysis_mode"),
+                            )
+                            .selected_text(
+                                if evaluator_data.analysis_mode.is_empty() {
                                     "Select".to_string()
                                 } else {
                                     evaluator_data.analysis_mode.clone()
-                                })
-                                .show_ui(ui, |ui| {
-                                    if ui.selectable_label(
-                                        evaluator_data.analysis_mode
-                                            == "Topic Extraction",
+                                },
+                            )
+                            .show_ui(ui, |ui| {
+                                if ui
+                                    .selectable_label(
+                                        evaluator_data.analysis_mode == "Topic Extraction",
                                         "Topic Extraction",
-                                    ).clicked() {
-                                        evaluator_data.analysis_mode =
-                                            "Topic Extraction".to_string();
-                                        evaluator_data.instruction = "Topic Extraction: extract the topic in 1 or 2 words. Identify what is the topic of the sentence being analysed.".to_string();
-                                    }
-                                    if ui.selectable_label(
-                                        evaluator_data.analysis_mode
-                                            == "Decision Analysis",
+                                    )
+                                    .clicked()
+                                {
+                                    evaluator_data.analysis_mode =
+                                        "Topic Extraction".to_string();
+                                    evaluator_data.instruction = "Topic Extraction: extract the topic in 1 or 2 words. Identify what is the topic of the sentence being analysed.".to_string();
+                                }
+                                if ui
+                                    .selectable_label(
+                                        evaluator_data.analysis_mode == "Decision Analysis",
                                         "Decision Analysis",
-                                    ).clicked() {
-                                        evaluator_data.analysis_mode =
-                                            "Decision Analysis".to_string();
-                                        evaluator_data.instruction = "Decision Analysis: extract a decision in 1 or 2 sentences about the agent in the message being analysed. Focus on the concrete decision and its intent.".to_string();
-                                    }
-                                    if ui.selectable_label(
+                                    )
+                                    .clicked()
+                                {
+                                    evaluator_data.analysis_mode =
+                                        "Decision Analysis".to_string();
+                                    evaluator_data.instruction = "Decision Analysis: extract a decision in 1 or 2 sentences about the agent in the message being analysed. Focus on the concrete decision and its intent.".to_string();
+                                }
+                                if ui
+                                    .selectable_label(
                                         evaluator_data.analysis_mode
                                             == "Sentiment Classification",
                                         "Sentiment Classification",
-                                    ).clicked() {
-                                        evaluator_data.analysis_mode =
-                                            "Sentiment Classification".to_string();
-                                        evaluator_data.instruction = "Sentiment Classification: extract the sentiment of the message being analysed and return one word that is the sentiment.".to_string();
-                                    }
-                                });
-                            });
-
-                            ui.horizontal(|ui| {
-                                ui.label("Instruction:");
-                                ui.add(egui::TextEdit::singleline(
-                                    &mut evaluator_data.instruction,
-                                ));
-                            });
-
-                            ui.horizontal(|ui| {
-                                if ui
-                                    .checkbox(&mut evaluator_data.limit_token, "Limit Token")
-                                    .changed()
+                                    )
+                                    .clicked()
                                 {
-                                    if !evaluator_data.limit_token {
-                                        evaluator_data.num_predict.clear();
-                                    }
-                                }
-                                if evaluator_data.limit_token {
-                                    ui.label("num_predict:");
-                                    ui.add(egui::TextEdit::singleline(
-                                        &mut evaluator_data.num_predict,
-                                    ).desired_width(80.0));
+                                    evaluator_data.analysis_mode =
+                                        "Sentiment Classification".to_string();
+                                    evaluator_data.instruction = "Sentiment Classification: extract the sentiment of the message being analysed and return one word that is the sentiment.".to_string();
                                 }
                             });
+                        });
 
-                            ui.separator();
-                            let is_connected = evaluator_data.worker_node.is_some();
-                            let button = if is_connected {
-                                egui::Button::new("Evaluating (connected)")
-                            } else {
-                                egui::Button::new(if evaluator_data.active {
-                                    "Stop Evaluating"
-                                } else {
-                                    "Evaluate"
-                                })
-                            };
+                        ui.horizontal(|ui| {
+                            ui.label("Instruction:");
+                            ui.add(egui::TextEdit::singleline(&mut evaluator_data.instruction));
+                        });
 
-                            ui.horizontal(|ui| {
-                                if !is_connected && ui.add(button).clicked() {
-                                    evaluator_data.active = !evaluator_data.active;
+                        ui.horizontal(|ui| {
+                            if ui
+                                .checkbox(&mut evaluator_data.limit_token, "Limit Token")
+                                .changed()
+                            {
+                                if !evaluator_data.limit_token {
+                                    evaluator_data.num_predict.clear();
                                 }
+                            }
+                            if evaluator_data.limit_token {
+                                ui.label("num_predict:");
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut evaluator_data.num_predict)
+                                        .desired_width(80.0),
+                                );
+                            }
+                        });
 
-                                if ui.button("Status").clicked() {
-                                    println!(
-                                        "=== Evaluator Node {:?} Status ===",
-                                        node
-                                    );
-                                    println!(
-                                        "Global ID: {}",
-                                        evaluator_data.global_id
-                                    );
-                                    println!(
-                                        "Name: {}",
-                                        evaluator_data.name
-                                    );
-                                }
-                            });
-                            ui.separator();
+                        ui.separator();
                     });
+                }
+
+                if let Some(pick) = pending_manager_pick {
+                    if let NodePayload::Evaluator(e) = &mut agents[idx].data.payload {
+                        e.manager_node = pick;
+                    }
+                }
+                if let Some(pick) = pending_agents_pick {
+                    if let NodePayload::Evaluator(e) = &mut agents[idx].data.payload {
+                        match pick {
+                            EvaluatorAgentsPick::Unassigned => {
+                                e.evaluate_all_workers = false;
+                                e.worker_node = None;
+                                e.active = false;
+                            }
+                            EvaluatorAgentsPick::AllWorkers => {
+                                e.evaluate_all_workers = true;
+                                e.worker_node = None;
+                                e.active = true;
+                            }
+                            EvaluatorAgentsPick::Worker(wid) => {
+                                e.evaluate_all_workers = false;
+                                e.worker_node = Some(wid);
+                                e.active = true;
+                            }
+                        }
+                    }
                 }
             }
             AgentNodeKind::Researcher => {
-                let my_worker_node = inputs
-                    .get(0)
-                    .and_then(|pin| pin.remotes.first())
-                    .map(|out_pin_id| out_pin_id.node);
-
-                let inferred_manager_node = my_worker_node
-                    .and_then(|wn| snarl.get_node(wn))
-                    .and_then(|nd| match &nd.payload {
-                        NodePayload::Worker(w) => w.manager_node,
-                        _ => None,
-                    });
-
-                let manager_name = inferred_manager_node
-                    .and_then(|mid| snarl.get_node(mid))
-                    .and_then(|nd| match &nd.payload {
-                        NodePayload::Manager(m) => Some(m.name.clone()),
-                        _ => None,
+                let mut managers: Vec<(usize, String)> = agents
+                    .iter()
+                    .filter_map(|a| {
+                        if let NodePayload::Manager(m) = &a.data.payload {
+                            Some((a.id, m.name.clone()))
+                        } else {
+                            None
+                        }
                     })
-                    .unwrap_or_else(|| "Unassigned".to_string());
+                    .collect();
+                managers.sort_by(|a, b| a.1.cmp(&b.1));
 
-                if let Some(node_mut) = snarl.get_node_mut(node) {
-                    if let NodePayload::Researcher(r) = &mut node_mut.payload {
-                        r.worker_node = my_worker_node;
-                        r.manager_node = inferred_manager_node;
-                        // Connected to a Worker node => behaves like clicking "Research".
-                        r.active = my_worker_node.is_some();
-                    }
-                }
+                let mut workers: Vec<(usize, String)> = agents
+                    .iter()
+                    .filter_map(|a| {
+                        if let NodePayload::Worker(w) = &a.data.payload {
+                            Some((a.id, w.name.clone()))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                workers.sort_by(|a, b| a.1.cmp(&b.1));
 
+                let (my_manager_node, my_injection_worker) = match &agents[idx].data.payload {
+                    NodePayload::Researcher(r) => (r.manager_node, r.worker_node),
+                    _ => (None, None),
+                };
+
+                let mut pending_manager_pick: Option<Option<usize>> = None;
+                let mut pending_injection_pick: Option<Option<usize>> = None;
                 {
-                    let node_mut = snarl.get_node_mut(node).unwrap();
-                    let researcher_data = match &mut node_mut.payload {
+                    let researcher_data = match &mut agents[idx].data.payload {
                         NodePayload::Researcher(r) => r,
                         _ => unreachable!("kind mismatch"),
                     };
 
                     ui.vertical(|ui| {
-                            ui.separator();
-                            AMSAgents::render_agent_researcher_header(
-                                ui,
-                                &manager_name,
-                            );
-                            ui.separator();
-
-                            ui.horizontal(|ui| {
-                                ui.label("Name:");
-                                ui.add(egui::TextEdit::singleline(
-                                    &mut researcher_data.name,
-                                ));
-                            });
-
-                            ui.horizontal(|ui| {
-                                ui.label("Topics:");
-                                egui::ComboBox::from_id_salt(
-                                    ui.id().with(node.0).with(
-                                        "research_topic_mode",
-                                    ),
-                                )
-                                .selected_text(if researcher_data.topic_mode
-                                    .is_empty()
+                        ui.horizontal(|ui| {
+                            ui.label("Manager:");
+                            let selected_text = my_manager_node
+                                .and_then(|mid| {
+                                    managers
+                                        .iter()
+                                        .find(|(id, _)| *id == mid)
+                                        .map(|(_, n)| n.clone())
+                                })
+                                .unwrap_or_else(|| "Unassigned".to_string());
+                            egui::ComboBox::from_id_salt(
+                                ui.id().with(id).with("researcher_manager_pick"),
+                            )
+                            .selected_text(selected_text)
+                            .show_ui(ui, |ui| {
+                                if ui
+                                    .selectable_label(my_manager_node.is_none(), "Unassigned")
+                                    .clicked()
                                 {
+                                    pending_manager_pick = Some(None);
+                                }
+                                for &(mgr_id, ref mgr_name) in &managers {
+                                    if ui
+                                        .selectable_label(
+                                            my_manager_node == Some(mgr_id),
+                                            mgr_name.as_str(),
+                                        )
+                                        .clicked()
+                                    {
+                                        pending_manager_pick = Some(Some(mgr_id));
+                                    }
+                                }
+                            });
+                        });
+
+                        ui.horizontal(|ui| {
+                            ui.label("Injection:");
+                            let selected_text = my_injection_worker
+                                .and_then(|wid| {
+                                    workers
+                                        .iter()
+                                        .find(|(id, _)| *id == wid)
+                                        .map(|(_, n)| n.clone())
+                                })
+                                .unwrap_or_else(|| "Unassigned".to_string());
+                            egui::ComboBox::from_id_salt(
+                                ui.id().with(id).with("researcher_injection_pick"),
+                            )
+                            .selected_text(selected_text)
+                            .show_ui(ui, |ui| {
+                                if ui
+                                    .selectable_label(
+                                        my_injection_worker.is_none(),
+                                        "Unassigned",
+                                    )
+                                    .clicked()
+                                {
+                                    pending_injection_pick = Some(None);
+                                }
+                                for &(worker_id, ref worker_name) in &workers {
+                                    if ui
+                                        .selectable_label(
+                                            my_injection_worker == Some(worker_id),
+                                            worker_name.as_str(),
+                                        )
+                                        .clicked()
+                                    {
+                                        pending_injection_pick = Some(Some(worker_id));
+                                    }
+                                }
+                            });
+                        });
+
+                        ui.separator();
+
+                        ui.horizontal(|ui| {
+                            ui.label("Name:");
+                            ui.add(egui::TextEdit::singleline(&mut researcher_data.name));
+                        });
+
+                        ui.horizontal(|ui| {
+                            ui.label("Topics:");
+                            egui::ComboBox::from_id_salt(
+                                ui.id().with(id).with("research_topic_mode"),
+                            )
+                            .selected_text(
+                                if researcher_data.topic_mode.is_empty() {
                                     "Select".to_string()
                                 } else {
                                     researcher_data.topic_mode.clone()
-                                })
-                                .show_ui(ui, |ui| {
-                                    if ui.selectable_label(
+                                },
+                            )
+                            .show_ui(ui, |ui| {
+                                if ui
+                                    .selectable_label(
                                         researcher_data.topic_mode == "Articles",
                                         "Articles",
-                                    ).clicked() {
-                                        researcher_data.topic_mode =
-                                            "Articles".to_string();
-                                        researcher_data.instruction = "Generate article references connected to the message context. Prefer a mix of classic and recent pieces.".to_string();
-                                    }
-                                    if ui.selectable_label(
+                                    )
+                                    .clicked()
+                                {
+                                    researcher_data.topic_mode = "Articles".to_string();
+                                    researcher_data.instruction = "Generate article references connected to the message context. Prefer a mix of classic and recent pieces.".to_string();
+                                }
+                                if ui
+                                    .selectable_label(
                                         researcher_data.topic_mode == "Movies",
                                         "Movies",
-                                    ).clicked() {
-                                        researcher_data.topic_mode =
-                                            "Movies".to_string();
-                                        researcher_data.instruction = "Generate movie references connected to the message context. Prefer diverse genres and well-known titles.".to_string();
-                                    }
-                                    if ui.selectable_label(
+                                    )
+                                    .clicked()
+                                {
+                                    researcher_data.topic_mode = "Movies".to_string();
+                                    researcher_data.instruction = "Generate movie references connected to the message context. Prefer diverse genres and well-known titles.".to_string();
+                                }
+                                if ui
+                                    .selectable_label(
                                         researcher_data.topic_mode == "Music",
                                         "Music",
-                                    ).clicked() {
-                                        researcher_data.topic_mode =
-                                            "Music".to_string();
-                                        researcher_data.instruction = "Generate music references connected to the message context. Include artist and track or album when possible.".to_string();
-                                    }
-                                });
-                            });
-
-                            ui.horizontal(|ui| {
-                                ui.label("Instruction:");
-                                ui.add(egui::TextEdit::singleline(
-                                    &mut researcher_data.instruction,
-                                ));
-                            });
-
-                            ui.horizontal(|ui| {
-                                if ui
-                                    .checkbox(&mut researcher_data.limit_token, "Token")
-                                    .changed()
+                                    )
+                                    .clicked()
                                 {
-                                    if !researcher_data.limit_token {
-                                        researcher_data.num_predict.clear();
-                                    }
-                                }
-                                if researcher_data.limit_token {
-                                    ui.label("num_predict:");
-                                    ui.add(egui::TextEdit::singleline(
-                                        &mut researcher_data.num_predict,
-                                    ).desired_width(80.0));
+                                    researcher_data.topic_mode = "Music".to_string();
+                                    researcher_data.instruction = "Generate music references connected to the message context. Include artist and track or album when possible.".to_string();
                                 }
                             });
+                        });
 
-                            ui.separator();
-                            let is_connected = researcher_data.worker_node.is_some();
-                            let button = if is_connected {
-                                egui::Button::new("Researching (connected)")
-                            } else {
-                                egui::Button::new(if researcher_data.active {
-                                    "Stop Researching"
-                                } else {
-                                    "Research"
-                                })
-                            };
+                        ui.horizontal(|ui| {
+                            ui.label("Instruction:");
+                            ui.add(egui::TextEdit::singleline(
+                                &mut researcher_data.instruction,
+                            ));
+                        });
 
-                            ui.horizontal(|ui| {
-                                if !is_connected && ui.add(button).clicked() {
-                                    researcher_data.active = !researcher_data.active;
+                        ui.horizontal(|ui| {
+                            if ui
+                                .checkbox(&mut researcher_data.limit_token, "Limit Tokens:")
+                                .changed()
+                            {
+                                if !researcher_data.limit_token {
+                                    researcher_data.num_predict.clear();
                                 }
+                            }
+                            if researcher_data.limit_token {
+                                ui.label("num_predict:");
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut researcher_data.num_predict)
+                                        .desired_width(80.0),
+                                );
+                            }
+                        });
 
-                                if ui.button("Status").clicked() {
-                                    println!(
-                                        "=== Researcher Node {:?} Status ===",
-                                        node
-                                    );
-                                    println!(
-                                        "Global ID: {}",
-                                        researcher_data.global_id
-                                    );
-                                    println!(
-                                        "Name: {}",
-                                        researcher_data.name
-                                    );
-                                }
-                            });
-                            ui.separator();
+                        ui.separator();
                     });
+                }
+
+                if let Some(pick) = pending_manager_pick {
+                    if let NodePayload::Researcher(r) = &mut agents[idx].data.payload {
+                        r.manager_node = pick;
+                    }
+                }
+                if let Some(pick) = pending_injection_pick {
+                    if let NodePayload::Researcher(r) = &mut agents[idx].data.payload {
+                        r.worker_node = pick;
+                        r.active = r.worker_node.is_some();
+                    }
                 }
             }
             AgentNodeKind::Topic => {
                 {
-                    let node_mut = snarl.get_node_mut(node).unwrap();
-                    let topic_data = match &mut node_mut.payload {
+                    let topic_data = match &mut agents[idx].data.payload {
                         NodePayload::Topic(t) => t,
                         _ => unreachable!("kind mismatch"),
                     };
@@ -1155,7 +992,7 @@ impl SnarlViewer<NodeData> for BasicNodeViewer {
                             ui.horizontal(|ui| {
                                 ui.label("Topic:");
                                 egui::ComboBox::from_id_salt(
-                                    ui.id().with(node.0).with("topic_analysis_mode"),
+                                    ui.id().with(id).with("topic_analysis_mode"),
                                 )
                                 .selected_text(if topic_data.analysis_mode.is_empty() {
                                     "Select".to_string()
@@ -1180,9 +1017,7 @@ impl SnarlViewer<NodeData> for BasicNodeViewer {
 
                             ui.horizontal(|ui| {
                                 ui.label("Topic:");
-                                ui.add(egui::TextEdit::singleline(
-                                    &mut topic_data.topic,
-                                ));
+                                ui.add(egui::TextEdit::singleline(&mut topic_data.topic));
                             });
                         });
 
@@ -1192,63 +1027,225 @@ impl SnarlViewer<NodeData> for BasicNodeViewer {
             }
         }
     }
-
-    fn has_graph_menu(&mut self, _pos: egui::Pos2, _snarl: &mut Snarl<NodeData>) -> bool {
-        true
+}
+/// Refresh evaluator/researcher `active` from row selections (combiners may skip the row body when collapsed).
+fn sync_evaluator_researcher_activity(agents: &mut [AgentRecord]) {
+    for r in agents.iter_mut() {
+        match &mut r.data.payload {
+            NodePayload::Evaluator(e) => {
+                e.active = e.evaluate_all_workers || e.worker_node.is_some();
+            }
+            NodePayload::Researcher(res) => {
+                res.active = res.worker_node.is_some();
+            }
+            _ => {}
+        }
     }
+}
 
-    fn show_graph_menu(
-        &mut self,
-        pos: egui::Pos2,
-        ui: &mut egui::Ui,
-        snarl: &mut Snarl<NodeData>,
-    ) {
-        ui.vertical(|ui| {
-            ui.label("Add Node");
-            ui.separator();
-
-            ui.small(egui::RichText::new("Agent").strong());
-            for kind in [
-                AgentNodeKind::Manager,
-                AgentNodeKind::Worker,
-                AgentNodeKind::Evaluator,
-                AgentNodeKind::Researcher,
-            ] {
-                debug_assert_eq!(kind.category(), NodeCategory::Agent);
-                if ui.button(kind.label()).clicked() {
-                    let mut node = match kind {
-                        AgentNodeKind::Manager => NodeData::new_manager(),
-                        AgentNodeKind::Worker => NodeData::new_worker(),
-                        AgentNodeKind::Evaluator => NodeData::new_evaluator(),
-                        AgentNodeKind::Researcher => NodeData::new_researcher(),
-                        _ => unreachable!("category mismatch"),
-                    };
-                    node.set_name(Self::numbered_name_for_kind(snarl, kind));
-                    snarl.insert_node(pos, node);
+fn manifest_edges_from_agents(agents: &[AgentRecord]) -> Vec<ManifestEdge> {
+    let mut edges = Vec::new();
+    for r in agents {
+        let nid = r.id;
+        match &r.data.payload {
+            NodePayload::Worker(w) => {
+                if let Some(m) = w.manager_node {
+                    edges.push(ManifestEdge {
+                        from_node_id: m,
+                        from_output_pin: 0,
+                        to_node_id: nid,
+                        to_input_pin: 0,
+                    });
+                }
+                if let Some(t) = w.topic_node {
+                    edges.push(ManifestEdge {
+                        from_node_id: t,
+                        from_output_pin: 0,
+                        to_node_id: nid,
+                        to_input_pin: 1,
+                    });
                 }
             }
-
-            ui.separator();
-            ui.small(egui::RichText::new("Tool").strong());
-            debug_assert_eq!(AgentNodeKind::Topic.category(), NodeCategory::Tool);
-            if ui.button(AgentNodeKind::Topic.label()).clicked() {
-                let mut node = NodeData::new_topic();
-                node.set_name(Self::numbered_name_for_kind(snarl, AgentNodeKind::Topic));
-                snarl.insert_node(pos, node);
+            NodePayload::Evaluator(e) => {
+                if let Some(m) = e.manager_node {
+                    edges.push(ManifestEdge {
+                        from_node_id: m,
+                        from_output_pin: 0,
+                        to_node_id: nid,
+                        to_input_pin: 0,
+                    });
+                }
+                if let Some(wid) = e.worker_node {
+                    if !e.evaluate_all_workers {
+                        edges.push(ManifestEdge {
+                            from_node_id: wid,
+                            from_output_pin: 0,
+                            to_node_id: nid,
+                            to_input_pin: 1,
+                        });
+                    }
+                }
             }
-
-            ui.separator();
-            ui.small(egui::RichText::new("Output").strong());
-            debug_assert_eq!(
-                AgentNodeKind::Conversation.category(),
-                NodeCategory::Output
-            );
-            if ui.button(AgentNodeKind::Conversation.label()).clicked() {
-                let mut node = NodeData::new_conversation();
-                node.set_name(Self::numbered_name_for_kind(snarl, AgentNodeKind::Conversation));
-                snarl.insert_node(pos, node);
+            NodePayload::Researcher(res) => {
+                if let Some(m) = res.manager_node {
+                    edges.push(ManifestEdge {
+                        from_node_id: m,
+                        from_output_pin: 0,
+                        to_node_id: nid,
+                        to_input_pin: 0,
+                    });
+                }
+                if let Some(wid) = res.worker_node {
+                    edges.push(ManifestEdge {
+                        from_node_id: wid,
+                        from_output_pin: 0,
+                        to_node_id: nid,
+                        to_input_pin: 1,
+                    });
+                }
             }
-        });
+            _ => {}
+        }
+    }
+    edges.sort_by_key(|e| {
+        (
+            e.from_node_id,
+            e.from_output_pin,
+            e.to_node_id,
+            e.to_input_pin,
+        )
+    });
+    edges
+}
+
+#[derive(serde::Serialize)]
+struct RunPlayPlanJson {
+    conversations: Vec<PlayConversationPairJson>,
+    managers: Vec<PlayManagerJson>,
+    evaluators: Vec<PlayEvaluatorInPlayJson>,
+    researchers: Vec<PlayResearcherInPlayJson>,
+}
+
+#[derive(serde::Serialize)]
+struct PlayConversationPairJson {
+    loop_key_node_id: usize,
+    agent_a: PlayWorkerInPlayJson,
+    agent_b: PlayWorkerInPlayJson,
+    /// True when only one eligible worker exists (paired with itself for the loop).
+    solo: bool,
+}
+
+#[derive(serde::Serialize)]
+struct PlayWorkerInPlayJson {
+    node_id: usize,
+    name: String,
+    global_id: String,
+    conversation_topic: String,
+    conversation_topic_source: String,
+}
+
+#[derive(serde::Serialize)]
+struct PlayManagerJson {
+    node_id: usize,
+    name: String,
+    global_id: String,
+}
+
+#[derive(serde::Serialize)]
+struct PlayEvaluatorInPlayJson {
+    node_id: usize,
+    name: String,
+    global_id: String,
+    analysis_mode: String,
+    evaluate_all_workers: bool,
+}
+
+#[derive(serde::Serialize)]
+struct PlayResearcherInPlayJson {
+    node_id: usize,
+    name: String,
+    global_id: String,
+    topic_mode: String,
+}
+
+fn build_conversation_sidecar_from_agents(
+    agents: &[AgentRecord],
+) -> crate::agent_conversation_loop::ConversationSidecarConfig {
+    use crate::agent_conversation_loop::{
+        ConversationSidecarConfig, SidecarEvaluator, SidecarResearcher,
+    };
+    let mut evaluators = Vec::new();
+    let mut researchers = Vec::new();
+    for r in agents {
+        match &r.data.payload {
+            NodePayload::Evaluator(e) if e.active => {
+                evaluators.push(SidecarEvaluator {
+                    instruction: e.instruction.clone(),
+                    analysis_mode: e.analysis_mode.clone(),
+                    limit_token: e.limit_token,
+                    num_predict: e.num_predict.clone(),
+                });
+            }
+            NodePayload::Researcher(res) if res.active => {
+                researchers.push(SidecarResearcher {
+                    topic_mode: res.topic_mode.clone(),
+                    instruction: res.instruction.clone(),
+                    limit_token: res.limit_token,
+                    num_predict: res.num_predict.clone(),
+                });
+            }
+            _ => {}
+        }
+    }
+    ConversationSidecarConfig {
+        evaluators,
+        researchers,
+    }
+}
+
+fn collect_run_play_plan_from_agents(
+    agents: &[AgentRecord],
+    conversations: Vec<PlayConversationPairJson>,
+) -> RunPlayPlanJson {
+    let mut managers = Vec::new();
+    let mut evaluators = Vec::new();
+    let mut researchers = Vec::new();
+    for r in agents {
+        let id = r.id;
+        match &r.data.payload {
+            NodePayload::Manager(m) => managers.push(PlayManagerJson {
+                node_id: id,
+                name: m.name.clone(),
+                global_id: m.global_id.clone(),
+            }),
+            NodePayload::Evaluator(e) if e.active => {
+                evaluators.push(PlayEvaluatorInPlayJson {
+                    node_id: id,
+                    name: e.name.clone(),
+                    global_id: e.global_id.clone(),
+                    analysis_mode: e.analysis_mode.clone(),
+                    evaluate_all_workers: e.evaluate_all_workers,
+                });
+            }
+            NodePayload::Researcher(res) if res.active => {
+                researchers.push(PlayResearcherInPlayJson {
+                    node_id: id,
+                    name: res.name.clone(),
+                    global_id: res.global_id.clone(),
+                    topic_mode: res.topic_mode.clone(),
+                });
+            }
+            _ => {}
+        }
+    }
+    managers.sort_by_key(|m| m.node_id);
+    evaluators.sort_by_key(|e| e.node_id);
+    researchers.sort_by_key(|r| r.node_id);
+    RunPlayPlanJson {
+        conversations,
+        managers,
+        evaluators,
+        researchers,
     }
 }
 
@@ -1274,9 +1271,10 @@ impl AMSAgents {
     fn capture_graph_snapshot(&self) -> GraphSnapshot {
         let mut nodes: Vec<ManifestNode> = self
             .nodes_panel
-            .snarl
-            .nodes_pos_ids()
-            .map(|(id, pos, node)| {
+            .agents
+            .iter()
+            .map(|rec| {
+                let node = &rec.data;
                 let (kind, config) = match &node.payload {
                     NodePayload::Manager(m) => (
                         "manager".to_string(),
@@ -1297,15 +1295,6 @@ impl AMSAgents {
                             "conversation_topic_source": w.conversation_topic_source,
                         }),
                     ),
-                    NodePayload::Conversation(c) => (
-                        "conversation".to_string(),
-                        serde_json::json!({
-                            "name": c.name,
-                            "global_id": c.global_id,
-                            "conversation_mode": c.conversation_mode,
-                            "conversation_active": c.conversation_active,
-                        }),
-                    ),
                     NodePayload::Evaluator(e) => (
                         "evaluator".to_string(),
                         serde_json::json!({
@@ -1316,6 +1305,7 @@ impl AMSAgents {
                             "limit_token": e.limit_token,
                             "num_predict": e.num_predict,
                             "active": e.active,
+                            "evaluate_all_workers": e.evaluate_all_workers,
                         }),
                     ),
                     NodePayload::Researcher(r) => (
@@ -1341,36 +1331,19 @@ impl AMSAgents {
                     ),
                 };
                 ManifestNode {
-                    node_id: id.0,
+                    node_id: rec.id,
                     kind,
                     label: node.label.clone(),
-                    pos_x: pos.x,
-                    pos_y: pos.y,
-                    open: self
-                        .nodes_panel
-                        .snarl
-                        .get_node_info(id)
-                        .map(|n| n.open)
-                        .unwrap_or(true),
+                    pos_x: rec.position.x,
+                    pos_y: rec.position.y,
+                    open: rec.open,
                     config,
                 }
             })
             .collect();
         nodes.sort_by_key(|n| n.node_id);
 
-        let mut edges: Vec<ManifestEdge> = self
-            .nodes_panel
-            .snarl
-            .wires()
-            .map(|(from, to)| ManifestEdge {
-                from_node_id: from.node.0,
-                from_output_pin: from.output,
-                to_node_id: to.node.0,
-                to_input_pin: to.input,
-            })
-            .collect();
-        edges.sort_by_key(|e| (e.from_node_id, e.from_output_pin, e.to_node_id, e.to_input_pin));
-
+        let edges = manifest_edges_from_agents(&self.nodes_panel.agents);
         GraphSnapshot { nodes, edges }
     }
 
@@ -1383,8 +1356,8 @@ impl AMSAgents {
         runtime.read_only_replay = read_only_replay;
         let graph = self.capture_graph_snapshot();
         let graph_signature = canonical_graph_signature(&runtime, &graph)?;
-        let experiment_id = experiment_id_override
-            .unwrap_or_else(|| derive_experiment_id(&graph_signature));
+        let experiment_id =
+            experiment_id_override.unwrap_or_else(|| derive_experiment_id(&graph_signature));
         let run_id = new_run_id();
 
         Ok(RunManifest {
@@ -1425,10 +1398,8 @@ impl AMSAgents {
     }
 
     fn clear_graph(&mut self) {
-        let ids: Vec<NodeId> = self.nodes_panel.snarl.nodes_ids_data().map(|(id, _)| id).collect();
-        for id in ids {
-            self.nodes_panel.snarl.remove_node(id);
-        }
+        self.nodes_panel.agents.clear();
+        self.nodes_panel.next_agent_id = 0;
     }
 
     pub(super) fn load_manifest_from_path(&mut self, path: PathBuf) -> anyhow::Result<()> {
@@ -1436,7 +1407,6 @@ impl AMSAgents {
         self.stop_graph();
         self.clear_graph();
 
-        let mut id_map: HashMap<usize, NodeId> = HashMap::new();
         let mut nodes_sorted = manifest.graph.nodes.clone();
         nodes_sorted.sort_by_key(|n| n.node_id);
 
@@ -1446,7 +1416,6 @@ impl AMSAgents {
             let mut node_data = match kind {
                 "manager" => NodeData::new_manager(),
                 "worker" => NodeData::new_worker(),
-                "conversation" => NodeData::new_conversation(),
                 "evaluator" => NodeData::new_evaluator(),
                 "researcher" => NodeData::new_researcher(),
                 "topic" => NodeData::new_topic(),
@@ -1488,17 +1457,6 @@ impl AMSAgents {
                         .unwrap_or(&w.conversation_topic_source)
                         .to_string();
                 }
-                (NodePayload::Conversation(c), "conversation") => {
-                    c.name = node.config["name"].as_str().unwrap_or(&c.name).to_string();
-                    c.global_id = node.config["global_id"]
-                        .as_str()
-                        .unwrap_or(&c.global_id)
-                        .to_string();
-                    c.conversation_mode = node.config["conversation_mode"]
-                        .as_str()
-                        .unwrap_or(&c.conversation_mode)
-                        .to_string();
-                }
                 (NodePayload::Evaluator(e), "evaluator") => {
                     e.name = node.config["name"].as_str().unwrap_or(&e.name).to_string();
                     e.global_id = node.config["global_id"]
@@ -1513,12 +1471,17 @@ impl AMSAgents {
                         .as_str()
                         .unwrap_or(&e.instruction)
                         .to_string();
-                    e.limit_token = node.config["limit_token"].as_bool().unwrap_or(e.limit_token);
+                    e.limit_token = node.config["limit_token"]
+                        .as_bool()
+                        .unwrap_or(e.limit_token);
                     e.num_predict = node.config["num_predict"]
                         .as_str()
                         .unwrap_or(&e.num_predict)
                         .to_string();
                     e.active = node.config["active"].as_bool().unwrap_or(e.active);
+                    e.evaluate_all_workers = node.config["evaluate_all_workers"]
+                        .as_bool()
+                        .unwrap_or(e.evaluate_all_workers);
                 }
                 (NodePayload::Researcher(r), "researcher") => {
                     r.name = node.config["name"].as_str().unwrap_or(&r.name).to_string();
@@ -1534,7 +1497,9 @@ impl AMSAgents {
                         .as_str()
                         .unwrap_or(&r.instruction)
                         .to_string();
-                    r.limit_token = node.config["limit_token"].as_bool().unwrap_or(r.limit_token);
+                    r.limit_token = node.config["limit_token"]
+                        .as_bool()
+                        .unwrap_or(r.limit_token);
                     r.num_predict = node.config["num_predict"]
                         .as_str()
                         .unwrap_or(&r.num_predict)
@@ -1551,40 +1516,81 @@ impl AMSAgents {
                         .as_str()
                         .unwrap_or(&t.analysis_mode)
                         .to_string();
-                    t.topic = node.config["topic"].as_str().unwrap_or(&t.topic).to_string();
+                    t.topic = node.config["topic"]
+                        .as_str()
+                        .unwrap_or(&t.topic)
+                        .to_string();
                 }
                 _ => {}
             }
 
-            let new_id = self.nodes_panel.snarl.insert_node(pos, node_data);
-            self.nodes_panel.snarl.open_node(new_id, node.open);
-            id_map.insert(node.node_id, new_id);
+            self.nodes_panel
+                .insert_agent_with_id(node.node_id, pos, node.open, node_data);
         }
 
         for edge in &manifest.graph.edges {
-            let Some(from_id) = id_map.get(&edge.from_node_id) else {
+            let from_id = edge.from_node_id;
+            let to_id = edge.to_node_id;
+            let mut to_input = edge.to_input_pin;
+            if let Some(to_n) = manifest
+                .graph
+                .nodes
+                .iter()
+                .find(|n| n.node_id == edge.to_node_id)
+            {
+                let kind = to_n.kind.as_str();
+                if (kind == "researcher" || kind == "evaluator") && to_input == 0 {
+                    if let Some(from_n) = manifest
+                        .graph
+                        .nodes
+                        .iter()
+                        .find(|n| n.node_id == edge.from_node_id)
+                    {
+                        if from_n.kind.as_str() == "worker" {
+                            to_input = 1;
+                        }
+                    }
+                }
+            }
+            let Some(rec) = self.nodes_panel.agent_by_id_mut(to_id) else {
                 continue;
             };
-            let Some(to_id) = id_map.get(&edge.to_node_id) else {
-                continue;
-            };
-            self.nodes_panel.snarl.connect(
-                OutPinId {
-                    node: *from_id,
-                    output: edge.from_output_pin,
-                },
-                InPinId {
-                    node: *to_id,
-                    input: edge.to_input_pin,
-                },
-            );
+            match &mut rec.data.payload {
+                NodePayload::Worker(w) => {
+                    if to_input == 0 {
+                        w.manager_node = Some(from_id);
+                    } else if to_input == 1 {
+                        w.topic_node = Some(from_id);
+                    }
+                }
+                NodePayload::Evaluator(e) => {
+                    if to_input == 0 {
+                        e.manager_node = Some(from_id);
+                    } else if to_input == 1 {
+                        e.worker_node = Some(from_id);
+                    }
+                }
+                NodePayload::Researcher(r) => {
+                    if to_input == 0 {
+                        r.manager_node = Some(from_id);
+                    } else if to_input == 1 {
+                        r.worker_node = Some(from_id);
+                    }
+                }
+                _ => {}
+            }
         }
 
-        self.selected_ollama_model = manifest
-            .runtime
-            .selected_model
-            .clone()
-            .unwrap_or_default();
+        for r in self.nodes_panel.agents.iter_mut() {
+            if let NodePayload::Evaluator(e) = &mut r.data.payload {
+                if e.evaluate_all_workers {
+                    e.worker_node = None;
+                }
+            }
+        }
+        sync_evaluator_researcher_activity(&mut self.nodes_panel.agents);
+
+        self.selected_ollama_model = manifest.runtime.selected_model.clone().unwrap_or_default();
         self.http_endpoint = manifest.runtime.http_endpoint.clone();
         self.conversation_turn_delay_secs = manifest.runtime.turn_delay_secs;
         self.conversation_history_size = manifest.runtime.history_size;
@@ -1602,28 +1608,35 @@ impl AMSAgents {
 
     pub(super) fn run_from_manifest_path(&mut self, path: PathBuf) -> anyhow::Result<()> {
         self.load_manifest_from_path(path)?;
-        self.run_graph();
+        let _ = self.run_graph();
         Ok(())
     }
 
     fn stop_graph(&mut self) {
-        // Stop all currently running conversation loops keyed by Conversation node id.
+        self.ollama_run_epoch.fetch_add(1, Ordering::SeqCst);
         for (_, flag, _) in &self.conversation_loop_handles {
             *flag.lock().unwrap() = false;
         }
         self.conversation_loop_handles.clear();
-
-        // Reflect stopped state in Conversation nodes.
-        for (_, node) in self.nodes_panel.snarl.nodes_ids_data_mut() {
-            if let NodePayload::Conversation(c) = &mut node.value.payload {
-                c.conversation_active = false;
-            }
-        }
+        self.conversation_graph_running = false;
     }
 
-    fn run_graph(&mut self) {
+    /// Returns `true` if the manifest was saved and conversation loops were (re)scheduled.
+    fn run_graph(&mut self) -> bool {
         // Bulletproof behavior: re-run means stop existing graph processes first.
         self.stop_graph();
+        self.last_evaluated_message_by_evaluator
+            .lock()
+            .unwrap()
+            .clear();
+        self.last_researched_message_by_researcher
+            .lock()
+            .unwrap()
+            .clear();
+        self.evaluator_event_queues.lock().unwrap().clear();
+        self.researcher_event_queues.lock().unwrap().clear();
+        self.evaluator_inflight_nodes.lock().unwrap().clear();
+        self.researcher_inflight_nodes.lock().unwrap().clear();
 
         let experiment_id_override = if self.read_only_replay_mode {
             self.current_manifest
@@ -1632,151 +1645,189 @@ impl AMSAgents {
         } else {
             None
         };
-        let manifest = match self.build_run_manifest(
-            experiment_id_override,
-            self.read_only_replay_mode,
-        ) {
-            Ok(m) => m,
-            Err(e) => {
-                self.manifest_status_message = format!("Manifest build failed: {e}");
-                eprintln!("[Run Graph] Manifest build failed: {e}");
-                return;
-            }
-        };
+        let manifest =
+            match self.build_run_manifest(experiment_id_override, self.read_only_replay_mode) {
+                Ok(m) => m,
+                Err(e) => {
+                    self.manifest_status_message = format!("Manifest build failed: {e}");
+                    eprintln!("[Run Graph] Manifest build failed: {e}");
+                    return false;
+                }
+            };
         if let Err(e) = self.persist_active_manifest(manifest) {
             self.manifest_status_message = format!("Manifest save failed: {e}");
             eprintln!("[Run Graph] Manifest save failed: {e}");
-            return;
+            return false;
         }
 
-        let mut to_start: Vec<(
-            NodeId,
-            NodeId,
-            String,
-            String,
-            String,
-            String,
-            usize,
-            String,
-            String,
-            String,
-            String,
-        )> = Vec::new();
+        sync_evaluator_researcher_activity(&mut self.nodes_panel.agents);
+        let sidecars = std::sync::Arc::new(build_conversation_sidecar_from_agents(
+            &self.nodes_panel.agents,
+        ));
 
-        for (conv_id, node) in self.nodes_panel.snarl.nodes_ids_data() {
-            let NodePayload::Conversation(c) = &node.value.payload else {
-                continue;
-            };
+        // Workers with a non-empty topic, stable order for pairing (row order by id).
+        struct EligibleWorker {
+            id: usize,
+            name: String,
+            instruction: String,
+            topic: String,
+            topic_source: String,
+        }
 
-            let Some(worker_a_id) = c.worker_a_node else {
-                continue;
-            };
-            let Some(w_a) = self.nodes_panel.snarl.get_node(worker_a_id) else {
-                continue;
-            };
-            let NodePayload::Worker(wa) = &w_a.payload else {
-                continue;
-            };
-
-            let a_topic_ok = !wa.conversation_topic.trim().is_empty();
-            let (
-                agent_b_id,
-                agent_b_name,
-                agent_b_instruction,
-                agent_b_topic,
-                agent_b_topic_source,
-            ) = if c.conversation_mode == "Monologue" {
-                if !a_topic_ok {
-                    continue;
+        let mut eligible: Vec<EligibleWorker> = self
+            .nodes_panel
+            .agents
+            .iter()
+            .filter_map(|r| {
+                if let NodePayload::Worker(w) = &r.data.payload {
+                    if !w.conversation_topic.trim().is_empty() {
+                        return Some(EligibleWorker {
+                            id: r.id,
+                            name: w.name.clone(),
+                            instruction: w.instruction.clone(),
+                            topic: w.conversation_topic.clone(),
+                            topic_source: w.conversation_topic_source.clone(),
+                        });
+                    }
                 }
-                (
-                    worker_a_id.0,
-                    wa.name.clone(),
-                    wa.instruction.clone(),
-                    wa.conversation_topic.clone(),
-                    wa.conversation_topic_source.clone(),
-                )
+                None
+            })
+            .collect();
+        eligible.sort_by_key(|w| w.id);
+
+        let mut conversations_plan = Vec::new();
+        let mut i = 0;
+        while i < eligible.len() {
+            if i + 1 < eligible.len() {
+                let a = &eligible[i];
+                let b = &eligible[i + 1];
+                let gid_a = self
+                    .nodes_panel
+                    .agents
+                    .iter()
+                    .find(|r| r.id == a.id)
+                    .and_then(|r| {
+                        if let NodePayload::Worker(w) = &r.data.payload {
+                            Some(w.global_id.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_default();
+                let gid_b = self
+                    .nodes_panel
+                    .agents
+                    .iter()
+                    .find(|r| r.id == b.id)
+                    .and_then(|r| {
+                        if let NodePayload::Worker(w) = &r.data.payload {
+                            Some(w.global_id.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_default();
+                conversations_plan.push(PlayConversationPairJson {
+                    loop_key_node_id: a.id,
+                    agent_a: PlayWorkerInPlayJson {
+                        node_id: a.id,
+                        name: a.name.clone(),
+                        global_id: gid_a,
+                        conversation_topic: a.topic.clone(),
+                        conversation_topic_source: a.topic_source.clone(),
+                    },
+                    agent_b: PlayWorkerInPlayJson {
+                        node_id: b.id,
+                        name: b.name.clone(),
+                        global_id: gid_b,
+                        conversation_topic: b.topic.clone(),
+                        conversation_topic_source: b.topic_source.clone(),
+                    },
+                    solo: false,
+                });
+                self.start_conversation_from_node_worker_resolved(
+                    sidecars.clone(),
+                    a.id,
+                    a.id,
+                    a.name.clone(),
+                    a.instruction.clone(),
+                    a.topic.clone(),
+                    a.topic_source.clone(),
+                    b.id,
+                    b.name.clone(),
+                    b.instruction.clone(),
+                    b.topic.clone(),
+                    b.topic_source.clone(),
+                );
+                i += 2;
             } else {
-                let Some(worker_b_id) = c.worker_b_node else {
-                    continue;
-                };
-                let Some(w_b) = self.nodes_panel.snarl.get_node(worker_b_id) else {
-                    continue;
-                };
-                let NodePayload::Worker(wb) = &w_b.payload else {
-                    continue;
-                };
-                let b_topic_ok = !wb.conversation_topic.trim().is_empty();
-                if !a_topic_ok || !b_topic_ok {
-                    continue;
-                }
-                (
-                    worker_b_id.0,
-                    wb.name.clone(),
-                    wb.instruction.clone(),
-                    wb.conversation_topic.clone(),
-                    wb.conversation_topic_source.clone(),
-                )
-            };
-
-            to_start.push((
-                conv_id,
-                worker_a_id,
-                wa.name.clone(),
-                wa.instruction.clone(),
-                wa.conversation_topic.clone(),
-                wa.conversation_topic_source.clone(),
-                agent_b_id,
-                agent_b_name,
-                agent_b_instruction,
-                agent_b_topic,
-                agent_b_topic_source,
-            ));
-        }
-
-        let started: HashSet<NodeId> = to_start.iter().map(|(id, ..)| *id).collect();
-        for (
-            conv_id,
-            worker_a_id,
-            a_name,
-            a_instr,
-            a_topic,
-            a_src,
-            b_id,
-            b_name,
-            b_instr,
-            b_topic,
-            b_src,
-        ) in to_start
-        {
-            self.start_conversation_from_node_worker_resolved(
-                conv_id,
-                worker_a_id,
-                a_name,
-                a_instr,
-                a_topic,
-                a_src,
-                b_id,
-                b_name,
-                b_instr,
-                b_topic,
-                b_src,
-            );
-        }
-
-        for (id, node) in self.nodes_panel.snarl.nodes_ids_data_mut() {
-            if let NodePayload::Conversation(c) = &mut node.value.payload {
-                c.conversation_active = started.contains(&id);
+                let a = &eligible[i];
+                let gid = self
+                    .nodes_panel
+                    .agents
+                    .iter()
+                    .find(|r| r.id == a.id)
+                    .and_then(|r| {
+                        if let NodePayload::Worker(w) = &r.data.payload {
+                            Some(w.global_id.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_default();
+                conversations_plan.push(PlayConversationPairJson {
+                    loop_key_node_id: a.id,
+                    agent_a: PlayWorkerInPlayJson {
+                        node_id: a.id,
+                        name: a.name.clone(),
+                        global_id: gid.clone(),
+                        conversation_topic: a.topic.clone(),
+                        conversation_topic_source: a.topic_source.clone(),
+                    },
+                    agent_b: PlayWorkerInPlayJson {
+                        node_id: a.id,
+                        name: a.name.clone(),
+                        global_id: gid,
+                        conversation_topic: a.topic.clone(),
+                        conversation_topic_source: a.topic_source.clone(),
+                    },
+                    solo: true,
+                });
+                self.start_conversation_from_node_worker_resolved(
+                    sidecars.clone(),
+                    a.id,
+                    a.id,
+                    a.name.clone(),
+                    a.instruction.clone(),
+                    a.topic.clone(),
+                    a.topic_source.clone(),
+                    a.id,
+                    a.name.clone(),
+                    a.instruction.clone(),
+                    a.topic.clone(),
+                    a.topic_source.clone(),
+                );
+                i += 1;
             }
         }
+
+        let play_plan =
+            collect_run_play_plan_from_agents(&self.nodes_panel.agents, conversations_plan);
+        match serde_json::to_string_pretty(&play_plan) {
+            Ok(json) => println!("[Run Graph] play plan:\n{}", json),
+            Err(e) => eprintln!("[Run Graph] failed to serialize play plan: {e}"),
+        }
+
+        self.conversation_graph_running = true;
+        true
     }
 
-    /// Starts the conversation loop for a **Conversation** node using the same ADK/HTTP flow as the old Workspace.
-    /// `agent_a_node_id` is the primary worker (input A); the async handle is keyed by `conversation_node_id`.
+    /// Keys the async loop by `loop_key_node_id` (first worker in each pair). Conversation output nodes were removed; pairing is automatic from eligible workers.
     fn start_conversation_from_node_worker_resolved(
         &mut self,
-        conversation_node_id: NodeId,
-        agent_a_node_id: NodeId,
+        sidecars: Arc<crate::agent_conversation_loop::ConversationSidecarConfig>,
+        loop_key_node_id: usize,
+        agent_a_node_id: usize,
         agent_a_name: String,
         agent_a_instruction: String,
         agent_a_topic: String,
@@ -1787,7 +1838,7 @@ impl AMSAgents {
         agent_b_topic: String,
         agent_b_topic_source: String,
     ) {
-        let agent_a_id = agent_a_node_id.0;
+        let agent_a_id = agent_a_node_id;
         let active_flag = Arc::new(Mutex::new(true));
         let flag_clone = active_flag.clone();
         let endpoint = self.http_endpoint.clone();
@@ -1802,9 +1853,16 @@ impl AMSAgents {
         let turn_delay_secs = self.conversation_turn_delay_secs;
         let handle = self.rt_handle.clone();
         let run_context = self.current_run_context.clone();
+        let message_event_source_id = loop_key_node_id;
+        let ollama_epoch = self.ollama_run_epoch.clone();
+        let ollama_caught = self.ollama_run_epoch.load(Ordering::SeqCst);
+        let ollama_stop_epoch = Some((ollama_epoch, ollama_caught));
 
         let loop_handle = handle.spawn(async move {
             crate::agent_conversation_loop::start_conversation_loop(
+                message_event_source_id,
+                ollama_stop_epoch,
+                sidecars,
                 agent_a_id,
                 agent_a_name,
                 agent_a_instruction,
@@ -1828,7 +1886,7 @@ impl AMSAgents {
         });
 
         self.conversation_loop_handles
-            .push((conversation_node_id.0, active_flag, loop_handle));
+            .push((loop_key_node_id, active_flag, loop_handle));
     }
 
     pub(super) fn render_nodes_panel(&mut self, ui: &mut egui::Ui) {
@@ -1912,7 +1970,6 @@ impl AMSAgents {
                                     AgentNodeKind::Worker,
                                     AgentNodeKind::Evaluator,
                                     AgentNodeKind::Researcher,
-                                    AgentNodeKind::Conversation,
                                 ] {
                                     ui.selectable_value(
                                         &mut self.nodes_panel.selected_add_kind,
@@ -1931,13 +1988,40 @@ impl AMSAgents {
                                 AgentNodeKind::Evaluator => NodeData::new_evaluator(),
                                 AgentNodeKind::Researcher => NodeData::new_researcher(),
                                 AgentNodeKind::Topic => NodeData::new_topic(),
-                                AgentNodeKind::Conversation => NodeData::new_conversation(),
                             };
                             node.set_name(BasicNodeViewer::numbered_name_for_kind(
-                                &self.nodes_panel.snarl,
+                                &self.nodes_panel.agents,
                                 self.nodes_panel.selected_add_kind,
                             ));
-                            self.nodes_panel.snarl.insert_node(egui::pos2(0.0, 0.0), node);
+                            self.nodes_panel
+                                .push_agent(egui::pos2(0.0, 0.0), node);
+                        }
+                        ui.add_space(6.0);
+                        let (start_stop_label, start_stop_hover) =
+                            if self.conversation_graph_running {
+                                (
+                                    "Stop",
+                                    "Stop conversation loops and agent streaming to the chat endpoint.",
+                                )
+                            } else {
+                                (
+                                    "Start",
+                                    "Save run manifest and start conversation loops for workers with a topic (paired in node order; optional HTTP streaming).",
+                                )
+                            };
+                        if ui
+                            .add_enabled(
+                                !self.read_only_replay_mode,
+                                egui::Button::new(start_stop_label),
+                            )
+                            .on_hover_text(start_stop_hover)
+                            .clicked()
+                        {
+                            if self.conversation_graph_running {
+                                self.stop_graph();
+                            } else {
+                                let _ = self.run_graph();
+                            }
                         }
                         if self.read_only_replay_mode {
                             ui.label(egui::RichText::new("Replay mode (read-only)").weak());
@@ -1945,48 +2029,33 @@ impl AMSAgents {
                     });
                     ui.separator();
 
-                    let node_ids: Vec<NodeId> = self
-                        .nodes_panel
-                        .snarl
-                        .nodes_ids_data()
-                        .map(|(id, _)| id)
-                        .collect();
+                    let mut node_ids: Vec<usize> =
+                        self.nodes_panel.agents.iter().map(|a| a.id).collect();
+                    node_ids.sort_unstable();
 
                     egui::ScrollArea::vertical().show(ui, |ui| {
-                        let mut row_remove: Vec<NodeId> = Vec::new();
+                        let mut row_remove: Vec<usize> = Vec::new();
                         for node_id in node_ids {
-                            let Some(node) = self.nodes_panel.snarl.get_node(node_id) else {
+                            let Some(rec) = self
+                                .nodes_panel
+                                .agents
+                                .iter()
+                                .find(|a| a.id == node_id)
+                            else {
                                 continue;
                             };
+                            let node = &rec.data;
                             let global_id = match &node.payload {
                                 NodePayload::Manager(m) => m.global_id.as_str(),
                                 NodePayload::Worker(w) => w.global_id.as_str(),
-                                NodePayload::Conversation(c) => c.global_id.as_str(),
                                 NodePayload::Evaluator(e) => e.global_id.as_str(),
                                 NodePayload::Researcher(r) => r.global_id.as_str(),
                                 NodePayload::Topic(t) => t.global_id.as_str(),
                             };
                             let row_label = node.label.clone();
-                            let kind = node.kind;
-                            let inputs: Vec<InPin> = (0..kind.inputs())
-                                .map(|input| {
-                                    self.nodes_panel.snarl.in_pin(InPinId {
-                                        node: node_id,
-                                        input,
-                                    })
-                                })
-                                .collect();
-                            let outputs: Vec<OutPin> = (0..kind.outputs())
-                                .map(|output| {
-                                    self.nodes_panel.snarl.out_pin(OutPinId {
-                                        node: node_id,
-                                        output,
-                                    })
-                                })
-                                .collect();
 
                             ui.set_width(ui.available_width());
-                            let row_state_id = ui.make_persistent_id(("agent_row", node_id.0));
+                            let row_state_id = ui.make_persistent_id(("agent_row", node_id));
                             let header_close = egui::collapsing_header::CollapsingState::load_with_default_open(
                                 ui.ctx(),
                                 row_state_id,
@@ -2019,294 +2088,319 @@ impl AMSAgents {
                             });
                             let _ = header_close.body(|ui| {
                                 ui.add_enabled_ui(!self.read_only_replay_mode, |ui| {
-                                    viewer.show_body(
-                                        node_id,
-                                        &inputs,
-                                        &outputs,
-                                        ui,
-                                        &mut self.nodes_panel.snarl,
-                                    );
+                                    viewer.show_body(node_id, ui, &mut self.nodes_panel.agents);
                                 });
                             });
                             ui.add_space(4.0);
                         }
                         for id in row_remove {
-                            self.nodes_panel.snarl.remove_node(id);
+                            self.nodes_panel.remove_agent(id);
                         }
                     });
                 });
 
                 let ctx = ui.ctx().clone();
+                sync_evaluator_researcher_activity(&mut self.nodes_panel.agents);
                 let mut pending_events = {
                     let mut q = self.conversation_message_events.lock().unwrap();
                     std::mem::take(&mut *q)
                 };
-                // Backward-compatible fallback if queue is empty but latest still has a message.
-                if pending_events.is_empty() {
-                    if let Some(last_msg) = self.last_message_in_chat.lock().unwrap().clone() {
-                        pending_events.push(last_msg);
+                if !self.conversation_graph_running {
+                    // Backward-compatible fallback if queue is empty but latest still has a message.
+                    if pending_events.is_empty() {
+                        if let Some(last_msg) = self.last_message_in_chat.lock().unwrap().clone()
+                        {
+                            pending_events.push(last_msg);
+                        }
                     }
-                }
-                // Output node category is currently represented by Conversation nodes.
-                let has_output_nodes = self.nodes_panel.snarl.nodes_ids_data().any(|(_, node)| {
-                    matches!(node.value.payload, NodePayload::Conversation(_))
-                });
+                    // HTTP POST for evaluator/researcher results (no separate output node type).
+                    let has_output_nodes = true;
 
-                // Queue new events for active Evaluator nodes.
-                for (id, node) in self.nodes_panel.snarl.nodes_ids_data() {
-                    if let NodePayload::Evaluator(e) = &node.value.payload {
+                    // Queue new events for active Evaluator nodes.
+                    for rec in &self.nodes_panel.agents {
+                        let id = rec.id;
+                        if let NodePayload::Evaluator(e) = &rec.data.payload {
+                            if !e.active {
+                                continue;
+                            }
+                            for raw in &pending_events {
+                                let (event_key, message) = if let Some((key, body)) =
+                                    raw.split_once("::MSG::")
+                                {
+                                    (key.to_string(), body.to_string())
+                                } else {
+                                    ("LEGACY".to_string(), raw.clone())
+                                };
+                                let last_eval = self
+                                    .last_evaluated_message_by_evaluator
+                                    .lock()
+                                    .unwrap()
+                                    .get(&id)
+                                    .cloned();
+                                if event_key.is_empty() || last_eval.as_ref() == Some(&event_key) {
+                                    continue;
+                                }
+                                self.last_evaluated_message_by_evaluator
+                                    .lock()
+                                    .unwrap()
+                                    .insert(id, event_key.clone());
+                                self.evaluator_event_queues
+                                    .lock()
+                                    .unwrap()
+                                    .entry(id)
+                                    .or_default()
+                                    .push_back((event_key, message));
+                            }
+                        }
+                    }
+
+                    // Queue new events for active Researcher nodes.
+                    for rec in &self.nodes_panel.agents {
+                        let id = rec.id;
+                        if let NodePayload::Researcher(r) = &rec.data.payload {
+                            if !r.active {
+                                continue;
+                            }
+                            for raw in &pending_events {
+                                let (event_key, message) = if let Some((key, body)) =
+                                    raw.split_once("::MSG::")
+                                {
+                                    (key.to_string(), body.to_string())
+                                } else {
+                                    ("LEGACY".to_string(), raw.clone())
+                                };
+                                let last_research = self
+                                    .last_researched_message_by_researcher
+                                    .lock()
+                                    .unwrap()
+                                    .get(&id)
+                                    .cloned();
+                                if event_key.is_empty()
+                                    || last_research.as_ref() == Some(&event_key)
+                                {
+                                    continue;
+                                }
+                                self.last_researched_message_by_researcher
+                                    .lock()
+                                    .unwrap()
+                                    .insert(id, event_key.clone());
+                                self.researcher_event_queues
+                                    .lock()
+                                    .unwrap()
+                                    .entry(id)
+                                    .or_default()
+                                    .push_back((event_key, message));
+                            }
+                        }
+                    }
+
+                    // Start at most one Evaluator inference per node (strict sequential order).
+                    for rec in &self.nodes_panel.agents {
+                        let id = rec.id;
+                        let NodePayload::Evaluator(e) = &rec.data.payload else {
+                            continue;
+                        };
                         if !e.active {
                             continue;
                         }
-                        for raw in &pending_events {
-                            let (event_key, message) = if let Some((key, body)) =
-                                raw.split_once("::MSG::")
-                            {
-                                (key.to_string(), body.to_string())
-                            } else {
-                                ("LEGACY".to_string(), raw.clone())
-                            };
-                            let last_eval = self
-                                .last_evaluated_message_by_evaluator
-                                .lock()
-                                .unwrap()
-                                .get(&id.0)
-                                .cloned();
-                            if event_key.is_empty() || last_eval.as_ref() == Some(&event_key) {
-                                continue;
-                            }
-                            self.last_evaluated_message_by_evaluator
-                                .lock()
-                                .unwrap()
-                                .insert(id.0, event_key.clone());
-                            self.evaluator_event_queues
-                                .lock()
-                                .unwrap()
-                                .entry(id.0)
-                                .or_default()
-                                .push_back((event_key, message));
+                        if self.evaluator_inflight_nodes.lock().unwrap().contains(&id) {
+                            continue;
                         }
-                    }
-                }
+                        let next_msg = self
+                            .evaluator_event_queues
+                            .lock()
+                            .unwrap()
+                            .entry(id)
+                            .or_default()
+                            .pop_front();
+                        let Some((_, message)) = next_msg else {
+                            continue;
+                        };
 
-                // Queue new events for active Researcher nodes.
-                for (id, node) in self.nodes_panel.snarl.nodes_ids_data() {
-                    if let NodePayload::Researcher(r) = &node.value.payload {
+                        self.evaluator_inflight_nodes.lock().unwrap().insert(id);
+                        let inflight = self.evaluator_inflight_nodes.clone();
+                        let node_key = id;
+                        let instruction = e.instruction.clone();
+                        let analysis_mode = e.analysis_mode.clone();
+                        let limit_token = e.limit_token;
+                        let num_predict = e.num_predict.clone();
+                        let endpoint = self.http_endpoint.clone();
+                        let has_output_nodes = has_output_nodes;
+                        let run_context = self.current_run_context.clone();
+                        let ctx = ctx.clone();
+                        let handle = self.rt_handle.clone();
+                        let selected_model = if self.selected_ollama_model.trim().is_empty() {
+                            None
+                        } else {
+                            Some(self.selected_ollama_model.clone())
+                        };
+                        let epoch_arc = self.ollama_run_epoch.clone();
+                        let epoch_caught = self.ollama_run_epoch.load(Ordering::SeqCst);
+                        handle.spawn(async move {
+                            match crate::adk_integration::send_to_ollama(
+                                &instruction,
+                                &message,
+                                limit_token,
+                                &num_predict,
+                                selected_model.as_deref(),
+                                Some((epoch_arc, epoch_caught)),
+                            )
+                            .await
+                            {
+                                Ok(response) => {
+                                    let response_lower = response.to_lowercase();
+                                    let sentiment = match analysis_mode.as_str() {
+                                        "Topic Extraction" => "topic",
+                                        "Decision Analysis" => "decision",
+                                        "Sentiment Classification" => {
+                                            if response_lower.contains("positive")
+                                                || response_lower.contains("happy")
+                                            {
+                                                "sentiment"
+                                            } else if response_lower.contains("negative")
+                                                || response_lower.contains("sad")
+                                                || response_lower.contains("angry")
+                                                || response_lower.contains("frustrated")
+                                            {
+                                                "sentiment"
+                                            } else if response_lower.contains("neutral") {
+                                                "sentiment"
+                                            } else {
+                                                "unknown"
+                                            }
+                                        }
+                                        _ => {
+                                            if response_lower.contains("happy") {
+                                                "happy"
+                                            } else if response_lower.contains("sad") {
+                                                "sad"
+                                            } else {
+                                                "analysis"
+                                            }
+                                        }
+                                    };
+                                    if has_output_nodes {
+                                        if let Err(e) =
+                                            crate::http_client::send_evaluator_result(
+                                                &endpoint,
+                                                "Agent Evaluator",
+                                                sentiment,
+                                                &response,
+                                                run_context.as_ref(),
+                                            )
+                                            .await
+                                        {
+                                            eprintln!(
+                                                "[Evaluator] Failed to send to ams-chat: {}",
+                                                e
+                                            );
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    if e.to_string() != crate::adk_integration::OLLAMA_STOPPED_MSG
+                                    {
+                                        eprintln!("[Evaluator] Ollama error: {}", e);
+                                    }
+                                }
+                            }
+                            inflight.lock().unwrap().remove(&node_key);
+                            ctx.request_repaint();
+                        });
+                    }
+
+                    // Start at most one Researcher inference per node (strict sequential order).
+                    for rec in &self.nodes_panel.agents {
+                        let id = rec.id;
+                        let NodePayload::Researcher(r) = &rec.data.payload else {
+                            continue;
+                        };
                         if !r.active {
                             continue;
                         }
-                        for raw in &pending_events {
-                            let (event_key, message) = if let Some((key, body)) =
-                                raw.split_once("::MSG::")
-                            {
-                                (key.to_string(), body.to_string())
-                            } else {
-                                ("LEGACY".to_string(), raw.clone())
-                            };
-                            let last_research = self
-                                .last_researched_message_by_researcher
-                                .lock()
-                                .unwrap()
-                                .get(&id.0)
-                                .cloned();
-                            if event_key.is_empty()
-                                || last_research.as_ref() == Some(&event_key)
-                            {
-                                continue;
-                            }
-                            self.last_researched_message_by_researcher
-                                .lock()
-                                .unwrap()
-                                .insert(id.0, event_key.clone());
-                            self.researcher_event_queues
-                                .lock()
-                                .unwrap()
-                                .entry(id.0)
-                                .or_default()
-                                .push_back((event_key, message));
+                        if self.researcher_inflight_nodes.lock().unwrap().contains(&id) {
+                            continue;
                         }
-                    }
-                }
+                        let next_msg = self
+                            .researcher_event_queues
+                            .lock()
+                            .unwrap()
+                            .entry(id)
+                            .or_default()
+                            .pop_front();
+                        let Some((_, message)) = next_msg else {
+                            continue;
+                        };
 
-                // Start at most one Evaluator inference per node (strict sequential order).
-                for (id, node) in self.nodes_panel.snarl.nodes_ids_data() {
-                    let NodePayload::Evaluator(e) = &node.value.payload else {
-                        continue;
-                    };
-                    if !e.active {
-                        continue;
-                    }
-                    if self.evaluator_inflight_nodes.lock().unwrap().contains(&id.0) {
-                        continue;
-                    }
-                    let next_msg = self
-                        .evaluator_event_queues
-                        .lock()
-                        .unwrap()
-                        .entry(id.0)
-                        .or_default()
-                        .pop_front();
-                    let Some((_, message)) = next_msg else {
-                        continue;
-                    };
-
-                    self.evaluator_inflight_nodes.lock().unwrap().insert(id.0);
-                    let inflight = self.evaluator_inflight_nodes.clone();
-                    let node_key = id.0;
-                    let instruction = e.instruction.clone();
-                    let analysis_mode = e.analysis_mode.clone();
-                    let limit_token = e.limit_token;
-                    let num_predict = e.num_predict.clone();
-                    let endpoint = self.http_endpoint.clone();
-                    let has_output_nodes = has_output_nodes;
-                    let run_context = self.current_run_context.clone();
-                    let ctx = ctx.clone();
-                    let handle = self.rt_handle.clone();
-                    let selected_model = if self.selected_ollama_model.trim().is_empty() {
-                        None
-                    } else {
-                        Some(self.selected_ollama_model.clone())
-                    };
-                    handle.spawn(async move {
-                        match crate::adk_integration::send_to_ollama(
-                            &instruction,
-                            &message,
-                            limit_token,
-                            &num_predict,
-                            selected_model.as_deref(),
-                        )
-                        .await
-                        {
-                            Ok(response) => {
-                                let response_lower = response.to_lowercase();
-                                let sentiment = match analysis_mode.as_str() {
-                                    "Topic Extraction" => "topic",
-                                    "Decision Analysis" => "decision",
-                                    "Sentiment Classification" => {
-                                        if response_lower.contains("positive")
-                                            || response_lower.contains("happy")
+                        self.researcher_inflight_nodes.lock().unwrap().insert(id);
+                        let inflight = self.researcher_inflight_nodes.clone();
+                        let node_key = id;
+                        let topic = if r.topic_mode.trim().is_empty() {
+                            "Articles".to_string()
+                        } else {
+                            r.topic_mode.clone()
+                        };
+                        let instruction = format!(
+                            "{}\n\nUsing the latest chat message, suggest 3 {} references related to what was said. Keep it concise with bullet points: title and one-line why it matches.",
+                            r.instruction,
+                            topic.to_lowercase()
+                        );
+                        let limit_token = r.limit_token;
+                        let num_predict = r.num_predict.clone();
+                        let endpoint = self.http_endpoint.clone();
+                        let has_output_nodes = has_output_nodes;
+                        let run_context = self.current_run_context.clone();
+                        let ctx = ctx.clone();
+                        let handle = self.rt_handle.clone();
+                        let selected_model = if self.selected_ollama_model.trim().is_empty() {
+                            None
+                        } else {
+                            Some(self.selected_ollama_model.clone())
+                        };
+                        let epoch_arc = self.ollama_run_epoch.clone();
+                        let epoch_caught = self.ollama_run_epoch.load(Ordering::SeqCst);
+                        handle.spawn(async move {
+                            match crate::adk_integration::send_to_ollama(
+                                &instruction,
+                                &message,
+                                limit_token,
+                                &num_predict,
+                                selected_model.as_deref(),
+                                Some((epoch_arc, epoch_caught)),
+                            )
+                            .await
+                            {
+                                Ok(response) => {
+                                    if has_output_nodes {
+                                        if let Err(e) =
+                                            crate::http_client::send_researcher_result(
+                                                &endpoint,
+                                                "Agent Researcher",
+                                                &topic,
+                                                &response,
+                                                run_context.as_ref(),
+                                            )
+                                            .await
                                         {
-                                            "sentiment"
-                                        } else if response_lower.contains("negative")
-                                            || response_lower.contains("sad")
-                                            || response_lower.contains("angry")
-                                            || response_lower.contains("frustrated")
-                                        {
-                                            "sentiment"
-                                        } else if response_lower.contains("neutral") {
-                                            "sentiment"
-                                        } else {
-                                            "unknown"
+                                            eprintln!(
+                                                "[Researcher] Failed to send to ams-chat: {}",
+                                                e
+                                            );
                                         }
                                     }
-                                    _ => {
-                                        if response_lower.contains("happy") {
-                                            "happy"
-                                        } else if response_lower.contains("sad") {
-                                            "sad"
-                                        } else {
-                                            "analysis"
-                                        }
-                                    }
-                                };
-                                if has_output_nodes {
-                                    if let Err(e) = crate::http_client::send_evaluator_result(
-                                        &endpoint,
-                                        "Agent Evaluator",
-                                        sentiment,
-                                        &response,
-                                        run_context.as_ref(),
-                                    )
-                                    .await
+                                }
+                                Err(e) => {
+                                    if e.to_string()
+                                        != crate::adk_integration::OLLAMA_STOPPED_MSG
                                     {
-                                        eprintln!("[Evaluator] Failed to send to ams-chat: {}", e);
+                                        eprintln!("[Researcher] Ollama error: {}", e);
                                     }
                                 }
                             }
-                            Err(e) => eprintln!("[Evaluator] Ollama error: {}", e),
-                        }
-                        inflight.lock().unwrap().remove(&node_key);
-                        ctx.request_repaint();
-                    });
-                }
-
-                // Start at most one Researcher inference per node (strict sequential order).
-                for (id, node) in self.nodes_panel.snarl.nodes_ids_data() {
-                    let NodePayload::Researcher(r) = &node.value.payload else {
-                        continue;
-                    };
-                    if !r.active {
-                        continue;
+                            inflight.lock().unwrap().remove(&node_key);
+                            ctx.request_repaint();
+                        });
                     }
-                    if self.researcher_inflight_nodes.lock().unwrap().contains(&id.0) {
-                        continue;
-                    }
-                    let next_msg = self
-                        .researcher_event_queues
-                        .lock()
-                        .unwrap()
-                        .entry(id.0)
-                        .or_default()
-                        .pop_front();
-                    let Some((_, message)) = next_msg else {
-                        continue;
-                    };
-
-                    self.researcher_inflight_nodes.lock().unwrap().insert(id.0);
-                    let inflight = self.researcher_inflight_nodes.clone();
-                    let node_key = id.0;
-                    let topic = if r.topic_mode.trim().is_empty() {
-                        "Articles".to_string()
-                    } else {
-                        r.topic_mode.clone()
-                    };
-                    let instruction = format!(
-                        "{}\n\nUsing the latest chat message, suggest 3 {} references related to what was said. Keep it concise with bullet points: title and one-line why it matches.",
-                        r.instruction,
-                        topic.to_lowercase()
-                    );
-                    let limit_token = r.limit_token;
-                    let num_predict = r.num_predict.clone();
-                    let endpoint = self.http_endpoint.clone();
-                    let has_output_nodes = has_output_nodes;
-                    let run_context = self.current_run_context.clone();
-                    let ctx = ctx.clone();
-                    let handle = self.rt_handle.clone();
-                    let selected_model = if self.selected_ollama_model.trim().is_empty() {
-                        None
-                    } else {
-                        Some(self.selected_ollama_model.clone())
-                    };
-                    handle.spawn(async move {
-                        match crate::adk_integration::send_to_ollama(
-                            &instruction,
-                            &message,
-                            limit_token,
-                            &num_predict,
-                            selected_model.as_deref(),
-                        )
-                        .await
-                        {
-                            Ok(response) => {
-                                if has_output_nodes {
-                                    if let Err(e) = crate::http_client::send_researcher_result(
-                                        &endpoint,
-                                        "Agent Researcher",
-                                        &topic,
-                                        &response,
-                                        run_context.as_ref(),
-                                    )
-                                    .await
-                                    {
-                                        eprintln!("[Researcher] Failed to send to ams-chat: {}", e);
-                                    }
-                                }
-                            }
-                            Err(e) => eprintln!("[Researcher] Ollama error: {}", e),
-                        }
-                        inflight.lock().unwrap().remove(&node_key);
-                        ctx.request_repaint();
-                    });
                 }
             },
         );
