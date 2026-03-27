@@ -2,6 +2,15 @@
 
 Agents Research Platform for HCI and Cognitive Sciences.
 
+
+### Overview
+
+This app runs agent workflows as a node graph.  
+Each node does one role, and edges define execution/data flow.
+
+
+## Building
+
 ```sh
 # Development: Builds to 'target/debug/'
 cargo run
@@ -10,10 +19,7 @@ cargo run
 cargo build --release
 ```
 
-### Overview
-
-This app runs agent workflows as a node graph.  
-Each node does one role, and edges define execution/data flow.
+## Current Architecture
 
 - `Agent` nodes: `Agent Manager`, `Agent Worker`, `Agent Evaluator`, `Agent Researcher`
 - `Tool` nodes: `Topic` (provides topic preset + topic text to Workers)
