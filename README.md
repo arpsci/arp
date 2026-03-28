@@ -31,11 +31,11 @@ cargo build --release
 
 ### Communication and Security
 
-- PASSWORD_VAULT
-- JSON `POST` to `CONVERSATION_HTTP_ENDPOINT` (default `http://localhost:3000/`).
-- Conversation events: `sender_id`, `receiver_id`, `topic`, `message`, …
-- Evaluator/researcher: `evaluator_name`, sentiment (researcher: `sentiment` like `references:<topic>`).
-- RFC3339 UTC timestamps; runs may include `experiment_id`, `run_id`, `manifest_version`.
+- **Vault:** Argon2 master-password gate; configure with `runs/.master_hash` (first line) or `AMS_MASTER_HASH`. Use `cargo run --bin gen_master_hash` once to create the hash file. Optional: Set `AMS_SKIP_VAULT=1` only for local development (disables the gate).
+- **Outbound HTTP:** JSON bodies are `POST`ed to `CONVERSATION_HTTP_ENDPOINT` (default `http://localhost:3000/`).
+- **Conversation payloads** include fields such as `sender_id`, `receiver_id`, `topic`, and `message` (plus other event metadata as emitted).
+- **Sidecars:** evaluators attach `evaluator_name` and sentiment; researchers use `sentiment` (e.g. `references:<topic>`) on the configured injection path.
+- **Time and run identity:** timestamps are RFC3339 UTC; runs may carry `experiment_id`, `run_id`, and `manifest_version`.
 
 ### Reproducible Runs
 

@@ -125,9 +125,9 @@ impl MasterVault {
                 .password(true)
                 .hint_text("••••••••"),
         );
-        if resp.changed() {
-            self.master_input = SecretString::new(plain.into_boxed_str());
-        }
+        // Always mirror the text field into `master_input`. Relying only on `changed()` is unsafe:
+        // password fields can desync from `changed()` across focus/Enter/lock-retry frames.
+        self.master_input = SecretString::new(plain.into_boxed_str());
 
         if ui.button("Unlock").clicked()
             || (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
@@ -146,16 +146,10 @@ impl MasterVault {
             return false;
         }
         let mut clicked = false;
-        ui.horizontal(|ui| {
-            ui.allocate_ui_with_layout(
-                egui::vec2(ui.available_width(), 0.0),
-                egui::Layout::right_to_left(egui::Align::Center),
-                |ui| {
-                    if ui.button("Lock").clicked() {
-                        clicked = true;
-                    }
-                },
-            );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.button("Lock").clicked() {
+                clicked = true;
+            }
         });
         clicked
     }

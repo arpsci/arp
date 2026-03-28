@@ -179,13 +179,11 @@ impl eframe::App for AMSAgentsApp {
             return;
         }
 
-        egui::TopBottomPanel::top("master_vault_lock_bar")
-            .frame(egui::Frame::NONE.inner_margin(egui::Margin::same(6)))
-            .show(ctx, |ui| {
-                if self.vault.show_lock_bar(ui) {
-                    self.vault.lock();
-                }
-            });
+        egui::TopBottomPanel::top("master_vault_lock_bar").show(ctx, |ui| {
+            if self.vault.show_lock_bar(ui) {
+                self.vault.lock();
+            }
+        });
 
         eframe::App::update(&mut self.ams_agents, ctx, frame);
     }
