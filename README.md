@@ -15,10 +15,10 @@ Agents Research Platform for HCI and Cognitive Sciences.
 # One-time vault: interactive prompt writes `runs/.master_hash` (PHC Argon2 hash for the password gate)
 cargo run --bin gen_master_hash
 
-# Development: run the GUI app (builds to `target/debug/`)
+# Development: run the application (`target/debug/`)
 cargo run
 
-# Distribution: Builds to 'target/release/'
+# Distribution: build the application ('target/release/')
 cargo build --release
 ```
 
