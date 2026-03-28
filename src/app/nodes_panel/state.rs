@@ -73,8 +73,4 @@ impl NodesPanelState {
     pub(super) fn remove_agent(&mut self, id: usize) {
         self.agents.retain(|a| a.id != id);
     }
-
-    pub(super) fn agent_by_id_mut(&mut self, id: usize) -> Option<&mut AgentRecord> {
-        self.agents.iter_mut().find(|a| a.id == id)
-    }
 }

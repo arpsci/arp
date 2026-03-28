@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const MANIFEST_VERSION: &str = "1.0.0";
+pub const MANIFEST_VERSION: &str = "2.0.0";
 pub const APP_NAME: &str = "ams-agents";
 
 static RUN_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -44,18 +44,10 @@ pub struct ManifestNode {
     pub config: serde_json::Value,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ManifestEdge {
-    pub from_node_id: usize,
-    pub from_output_pin: usize,
-    pub to_node_id: usize,
-    pub to_input_pin: usize,
-}
-
+/// Workspace snapshot: one record per agent row. Links (`manager_node`, `worker_node`, …) live in each node `config`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GraphSnapshot {
     pub nodes: Vec<ManifestNode>,
-    pub edges: Vec<ManifestEdge>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

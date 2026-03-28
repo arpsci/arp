@@ -9,8 +9,18 @@ use crate::reproducibility::{
     new_run_id, now_rfc3339_utc, read_manifest, runs_root, write_manifest,
 };
 
-use super::manifest_graph::{manifest_edges_from_agents, sync_evaluator_researcher_activity};
+use super::manifest_graph::sync_evaluator_researcher_activity;
 use super::model::{NodeData, NodePayload};
+
+fn json_opt_usize(config: &serde_json::Value, key: &str) -> Option<usize> {
+    config.get(key).and_then(|v| {
+        if v.is_null() {
+            None
+        } else {
+            v.as_u64().map(|u| u as usize)
+        }
+    })
+}
 
 impl AMSAgents {
     fn selected_model_option(&self) -> Option<String> {
@@ -56,6 +66,8 @@ impl AMSAgents {
                             "analysis_mode": w.analysis_mode,
                             "conversation_topic": w.conversation_topic,
                             "conversation_topic_source": w.conversation_topic_source,
+                            "manager_node": w.manager_node,
+                            "topic_node": w.topic_node,
                         }),
                     ),
                     NodePayload::Evaluator(e) => (
@@ -69,6 +81,8 @@ impl AMSAgents {
                             "num_predict": e.num_predict,
                             "active": e.active,
                             "evaluate_all_workers": e.evaluate_all_workers,
+                            "manager_node": e.manager_node,
+                            "worker_node": e.worker_node,
                         }),
                     ),
                     NodePayload::Researcher(r) => (
@@ -81,6 +95,8 @@ impl AMSAgents {
                             "limit_token": r.limit_token,
                             "num_predict": r.num_predict,
                             "active": r.active,
+                            "manager_node": r.manager_node,
+                            "worker_node": r.worker_node,
                         }),
                     ),
                     NodePayload::Topic(t) => (
@@ -106,8 +122,7 @@ impl AMSAgents {
             .collect();
         nodes.sort_by_key(|n| n.node_id);
 
-        let edges = manifest_edges_from_agents(&self.nodes_panel.agents);
-        GraphSnapshot { nodes, edges }
+        GraphSnapshot { nodes }
     }
 
     pub(crate) fn build_run_manifest(
@@ -222,6 +237,8 @@ impl AMSAgents {
                         .as_str()
                         .unwrap_or(&w.conversation_topic_source)
                         .to_string();
+                    w.manager_node = json_opt_usize(&node.config, "manager_node");
+                    w.topic_node = json_opt_usize(&node.config, "topic_node");
                 }
                 (NodePayload::Evaluator(e), "evaluator") => {
                     e.name = node.config["name"].as_str().unwrap_or(&e.name).to_string();
@@ -248,6 +265,8 @@ impl AMSAgents {
                     e.evaluate_all_workers = node.config["evaluate_all_workers"]
                         .as_bool()
                         .unwrap_or(e.evaluate_all_workers);
+                    e.manager_node = json_opt_usize(&node.config, "manager_node");
+                    e.worker_node = json_opt_usize(&node.config, "worker_node");
                 }
                 (NodePayload::Researcher(r), "researcher") => {
                     r.name = node.config["name"].as_str().unwrap_or(&r.name).to_string();
@@ -271,6 +290,8 @@ impl AMSAgents {
                         .unwrap_or(&r.num_predict)
                         .to_string();
                     r.active = node.config["active"].as_bool().unwrap_or(r.active);
+                    r.manager_node = json_opt_usize(&node.config, "manager_node");
+                    r.worker_node = json_opt_usize(&node.config, "worker_node");
                 }
                 (NodePayload::Topic(t), "topic") => {
                     t.name = node.config["name"].as_str().unwrap_or(&t.name).to_string();
@@ -292,59 +313,6 @@ impl AMSAgents {
 
             self.nodes_panel
                 .insert_agent_with_id(node.node_id, pos, node.open, node_data);
-        }
-
-        for edge in &manifest.graph.edges {
-            let from_id = edge.from_node_id;
-            let to_id = edge.to_node_id;
-            let mut to_input = edge.to_input_pin;
-            if let Some(to_n) = manifest
-                .graph
-                .nodes
-                .iter()
-                .find(|n| n.node_id == edge.to_node_id)
-            {
-                let kind = to_n.kind.as_str();
-                if (kind == "researcher" || kind == "evaluator") && to_input == 0 {
-                    if let Some(from_n) = manifest
-                        .graph
-                        .nodes
-                        .iter()
-                        .find(|n| n.node_id == edge.from_node_id)
-                    {
-                        if from_n.kind.as_str() == "worker" {
-                            to_input = 1;
-                        }
-                    }
-                }
-            }
-            let Some(rec) = self.nodes_panel.agent_by_id_mut(to_id) else {
-                continue;
-            };
-            match &mut rec.data.payload {
-                NodePayload::Worker(w) => {
-                    if to_input == 0 {
-                        w.manager_node = Some(from_id);
-                    } else if to_input == 1 {
-                        w.topic_node = Some(from_id);
-                    }
-                }
-                NodePayload::Evaluator(e) => {
-                    if to_input == 0 {
-                        e.manager_node = Some(from_id);
-                    } else if to_input == 1 {
-                        e.worker_node = Some(from_id);
-                    }
-                }
-                NodePayload::Researcher(r) => {
-                    if to_input == 0 {
-                        r.manager_node = Some(from_id);
-                    } else if to_input == 1 {
-                        r.worker_node = Some(from_id);
-                    }
-                }
-                _ => {}
-            }
         }
 
         for r in self.nodes_panel.agents.iter_mut() {
