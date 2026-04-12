@@ -262,12 +262,10 @@ impl AMSAgents {
 
 // ─── Terminal launcher ──────────────────────────────────────────────────────
 
-/// Launch a system terminal emulator with the venv activated via environment
-/// variables. Does not require `source activate` — uses `VIRTUAL_ENV` +
-/// adjusted `PATH` so the shell picks up the venv's Python automatically.
+/// Launch a terminal emulator running the venv's Python interpreter interactively.
 ///
-/// Tries, in order: `$TERMINAL`, `x-terminal-emulator`, `gnome-terminal`,
-/// `xterm` on Linux/BSD; `open -a Terminal` on macOS; `cmd /k` on Windows.
+/// Each emulator receives the venv's `python` binary as the command to execute,
+/// so the user lands directly in a Python REPL with that environment active.
 fn open_runtime_terminal(
     runtime: &crate::python_runtime::PythonRuntime,
     status: &mut String,
@@ -280,87 +278,72 @@ fn open_runtime_terminal(
         }
     };
 
-    // Platform-specific venv bin dir
-    let bin_dir = if cfg!(windows) {
-        root.join("Scripts")
-    } else {
-        root.join("bin")
-    };
-
-    // Build the child's PATH: venv/bin first, then system PATH
+    let bin_dir = if cfg!(windows) { root.join("Scripts") } else { root.join("bin") };
+    let python_bin = bin_dir.join(if cfg!(windows) { "python.exe" } else { "python" });
+    let python_str  = python_bin.to_string_lossy().to_string();
+    let venv_str    = root.to_string_lossy().to_string();
     let system_path = std::env::var("PATH").unwrap_or_default();
-    let venv_path = format!("{}:{}", bin_dir.display(), system_path);
-
-    // Common env vars understood by most shells to "activate" a venv
-    let venv_str = root.to_string_lossy().to_string();
+    let venv_path   = format!("{}:{system_path}", bin_dir.display());
 
     #[cfg(target_os = "macos")]
     {
-        let activate_cmd = format!(
-            "export VIRTUAL_ENV='{}'; export PATH='{}'; exec $SHELL",
-            venv_str, venv_path,
-        );
-        let script = format!(
-            "tell application \"Terminal\" to do script \"{}\"",
-            activate_cmd.replace('"', "\\\"")
-        );
-        match std::process::Command::new("osascript")
-            .args(["-e", &script])
-            .env("VIRTUAL_ENV", &venv_str)
-            .env("PATH", &venv_path)
-            .spawn()
-        {
-            Ok(_) => *status = "Opened terminal with venv activated.".to_string(),
+        // Tell Terminal.app to open a new window running the venv python directly.
+        let script = format!("tell application \"Terminal\" to do script \"'{python_str}'\"");
+        match std::process::Command::new("osascript").args(["-e", &script]).spawn() {
+            Ok(_) => *status = "Opened Python REPL in Terminal.app.".to_string(),
             Err(e) => *status = format!("Could not open Terminal.app: {e}"),
         }
     }
 
     #[cfg(windows)]
     {
-        // On Windows open cmd.exe keeping the inherited environment
-        launch(
-            &venv_path,
-            &venv_str,
-            status,
-            &[("cmd", &["/k", "echo Venv activated. Type 'python' to start."])],
-        );
+        match std::process::Command::new("cmd")
+            .args(["/k", &python_str])
+            .env("VIRTUAL_ENV", &venv_str)
+            .env("PATH", &venv_path)
+            .spawn()
+        {
+            Ok(_) => *status = "Opened Python REPL in cmd.exe.".to_string(),
+            Err(e) => *status = format!("Could not open cmd.exe: {e}"),
+        }
     }
 
     #[cfg(not(any(target_os = "macos", windows)))]
     {
-        // Linux / BSD: try common terminal emulators in preference order.
-        // $TERMINAL is respected first so users can set their own.
+        // Most Linux/BSD terminal emulators accept `-e <cmd>` to run a command
+        // instead of the default shell. gnome-terminal uses `--` as separator.
         let user_term = std::env::var("TERMINAL").unwrap_or_default();
-        let mut candidates: Vec<(&str, Vec<&str>)> = Vec::new();
 
+        // (emulator binary, args that come before the python path)
+        let mut candidates: Vec<(String, Vec<String>)> = Vec::new();
         if !user_term.is_empty() {
-            candidates.push((Box::leak(user_term.into_boxed_str()), vec![]));
+            candidates.push((user_term, vec!["-e".into()]));
         }
-        candidates.extend_from_slice(&[
-            ("x-terminal-emulator", vec![]),
-            ("gnome-terminal",      vec!["--"]),
-            ("xfce4-terminal",      vec![]),
-            ("konsole",             vec![]),
-            ("xterm",               vec![]),
+        candidates.extend([
+            ("x-terminal-emulator".into(), vec!["-e".into()]),
+            ("gnome-terminal".into(),      vec!["--".into()]),
+            ("xfce4-terminal".into(),      vec!["-e".into()]),
+            ("konsole".into(),             vec!["-e".into()]),
+            ("xterm".into(),               vec!["-e".into()]),
         ]);
 
-        // Convert to the form the helper expects
-        for (prog, args) in &candidates {
+        for (prog, pre_args) in &candidates {
+            let mut args = pre_args.clone();
+            args.push(python_str.clone());
             let result = std::process::Command::new(prog)
-                .args(args.as_slice())
+                .args(&args)
                 .env("VIRTUAL_ENV", &venv_str)
                 .env("PATH", &venv_path)
                 .env("VIRTUAL_ENV_DISABLE_PROMPT", "1")
                 .spawn();
             match result {
                 Ok(_) => {
-                    *status = "Opened terminal with venv activated.".to_string();
+                    *status = "Opened Python REPL in terminal.".to_string();
                     return;
                 }
                 Err(_) => continue,
             }
         }
-        *status =
-            "Could not find a terminal emulator. Set $TERMINAL or install xterm.".to_string();
+        *status = "Could not find a terminal emulator. Set $TERMINAL or install xterm.".to_string();
     }
 }

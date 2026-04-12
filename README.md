@@ -2,6 +2,8 @@
 
 Agents Research Platform for HCI and Cognitive Sciences (Dashboard).
 
+
+
 ### Overview
 
 - Multi-agent conversations
@@ -42,11 +44,14 @@ cargo build --release
 - **Time and run identity:** timestamps are RFC3339 UTC; runs may carry `experiment_id`, `run_id`, and `manifest_version`.
 - **Dev bypass:** set `AMS_SKIP_VAULT=1` only for local development to disable the vault gate.
 
+
+
 ### Python Runtimes
 
-- **Contained venvs:** each runtime is an isolated Python virtual environment stored under `runtimes/python/{id}/`, created from a [`PythonRuntimeSpec`](src/python_runtime.rs) (base interpreter, requirements list, optional post-install commands).
-- **Registry:** all runtimes are tracked in `runtimes/python/python_runtimes.json` with stable `pyrt_<hash>` ids, resolved Python version, and lifecycle state.
-- **Reproducibility:** `pip freeze` output is written to `requirements.lock` on creation; a SHA-256 digest of that file is embedded in the run manifest as a `PythonRuntimeRef` for full dependency traceability.
-- **Traceable execution:** Python tasks are launched via [`launch_task()`](src/python_runtime.rs) with `VIRTUAL_ENV`/`PATH` set by environment variables only (no global shell activation). `ARP_EXPERIMENT_ID`, `ARP_RUN_ID`, and `ARP_EVENTS_PATH` are injected automatically. Stdout/stderr are captured to `runs/{experiment_id}/{run_id}/python_tasks/{task_id}/`, alongside a `meta.json` sidecar.
-- **Event ledger:** each task invocation emits `python_task.started` and `python_task.finished` events into the run ledger with entrypoint, args, exit code, and log file pointers.
-- **Lifecycle:** runtimes progress through `Active` → `Deprecated` → `Deleted`. Physical deletion removes the venv directory but retains the manifest entry so historical runs remain traceable.
+You can create and manage isolated Python virtual environments per experiment via the **Python** tab.
+
+- Create a venv from any system interpreter, install packages into it, and destroy it when done.
+- Each runtime is stored under `runtimes/python/{id}/` and tracked in `python_runtimes.json`.
+- `pip freeze` is captured on creation for reproducibility; execution is fully traceable via the run ledger.
+
+Install NumPy on cursom venv: `import numpy as np; print(np.arange(6).reshape(2, 3))`
