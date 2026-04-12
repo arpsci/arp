@@ -211,7 +211,14 @@ impl AMSAgents {
                             }
                         }
 
-                        ui.add_space(16.0);
+                        ui.add_space(8.0);
+
+                        // Open interactive terminal with venv activated
+                        if ui.button("Open Env").on_hover_text("Open a terminal with this venv activated").clicked() {
+                            open_runtime_terminal(&rt_cloned, &mut self.python_status);
+                        }
+
+                        ui.add_space(8.0);
 
                         // Destroy
                         let destroy_btn = ui.add(egui::Button::new(
@@ -250,5 +257,110 @@ impl AMSAgents {
                 ui.label(egui::RichText::new(&self.python_status).small().weak());
             }
         });
+    }
+}
+
+// ─── Terminal launcher ──────────────────────────────────────────────────────
+
+/// Launch a system terminal emulator with the venv activated via environment
+/// variables. Does not require `source activate` — uses `VIRTUAL_ENV` +
+/// adjusted `PATH` so the shell picks up the venv's Python automatically.
+///
+/// Tries, in order: `$TERMINAL`, `x-terminal-emulator`, `gnome-terminal`,
+/// `xterm` on Linux/BSD; `open -a Terminal` on macOS; `cmd /k` on Windows.
+fn open_runtime_terminal(
+    runtime: &crate::python_runtime::PythonRuntime,
+    status: &mut String,
+) {
+    let root = match &runtime.root_path {
+        Some(p) => p.clone(),
+        None => {
+            *status = "Error: runtime has no path (deleted?).".to_string();
+            return;
+        }
+    };
+
+    // Platform-specific venv bin dir
+    let bin_dir = if cfg!(windows) {
+        root.join("Scripts")
+    } else {
+        root.join("bin")
+    };
+
+    // Build the child's PATH: venv/bin first, then system PATH
+    let system_path = std::env::var("PATH").unwrap_or_default();
+    let venv_path = format!("{}:{}", bin_dir.display(), system_path);
+
+    // Common env vars understood by most shells to "activate" a venv
+    let venv_str = root.to_string_lossy().to_string();
+
+    #[cfg(target_os = "macos")]
+    {
+        let activate_cmd = format!(
+            "export VIRTUAL_ENV='{}'; export PATH='{}'; exec $SHELL",
+            venv_str, venv_path,
+        );
+        let script = format!(
+            "tell application \"Terminal\" to do script \"{}\"",
+            activate_cmd.replace('"', "\\\"")
+        );
+        match std::process::Command::new("osascript")
+            .args(["-e", &script])
+            .env("VIRTUAL_ENV", &venv_str)
+            .env("PATH", &venv_path)
+            .spawn()
+        {
+            Ok(_) => *status = "Opened terminal with venv activated.".to_string(),
+            Err(e) => *status = format!("Could not open Terminal.app: {e}"),
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        // On Windows open cmd.exe keeping the inherited environment
+        launch(
+            &venv_path,
+            &venv_str,
+            status,
+            &[("cmd", &["/k", "echo Venv activated. Type 'python' to start."])],
+        );
+    }
+
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        // Linux / BSD: try common terminal emulators in preference order.
+        // $TERMINAL is respected first so users can set their own.
+        let user_term = std::env::var("TERMINAL").unwrap_or_default();
+        let mut candidates: Vec<(&str, Vec<&str>)> = Vec::new();
+
+        if !user_term.is_empty() {
+            candidates.push((Box::leak(user_term.into_boxed_str()), vec![]));
+        }
+        candidates.extend_from_slice(&[
+            ("x-terminal-emulator", vec![]),
+            ("gnome-terminal",      vec!["--"]),
+            ("xfce4-terminal",      vec![]),
+            ("konsole",             vec![]),
+            ("xterm",               vec![]),
+        ]);
+
+        // Convert to the form the helper expects
+        for (prog, args) in &candidates {
+            let result = std::process::Command::new(prog)
+                .args(args.as_slice())
+                .env("VIRTUAL_ENV", &venv_str)
+                .env("PATH", &venv_path)
+                .env("VIRTUAL_ENV_DISABLE_PROMPT", "1")
+                .spawn();
+            match result {
+                Ok(_) => {
+                    *status = "Opened terminal with venv activated.".to_string();
+                    return;
+                }
+                Err(_) => continue,
+            }
+        }
+        *status =
+            "Could not find a terminal emulator. Set $TERMINAL or install xterm.".to_string();
     }
 }
