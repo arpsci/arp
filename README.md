@@ -39,11 +39,6 @@ cargo build --release
 - **Vault key derivation + encryption:** vault payload keys are derived separately from the master password (`Argon2id + HKDF-SHA256`) and encrypted with AEAD (`ChaCha20-Poly1305`) using random salt/nonce and versioned metadata.
 - **Outbound HTTP:** JSON bodies are `POST`ed to `CONVERSATION_HTTP_ENDPOINT` (default `http://localhost:3000/`) unless air-gap mode is enabled.
 - **Air-gap mode:** set `AMS_AIR_GAP=1` to block non-loopback outbound HTTP; optional `AMS_ALLOW_LOCAL_OLLAMA=0` also blocks local Ollama requests. Blocked attempts are mirrored to the run ledger as `transport.http_blocked` events.
-- **Conversation payloads** include fields such as `sender_id`, `receiver_id`, `topic`, and `message` (plus other event metadata as emitted).
-- **Sidecars:** evaluators attach `evaluator_name` and sentiment; researchers use `sentiment` (e.g. `references:<topic>`) on the configured injection path.
-- **Time and run identity:** timestamps are RFC3339 UTC; runs may carry `experiment_id`, `run_id`, and `manifest_version`.
-- **Dev bypass:** set `AMS_SKIP_VAULT=1` only for local development to disable the vault gate.
-
 
 
 ### Python Runtimes
