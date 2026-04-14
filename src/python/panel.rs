@@ -6,14 +6,14 @@ use std::sync::Arc;
 
 use eframe::egui;
 
-use super::AMSAgents;
-use crate::python_runtime::{
+use crate::python::{
     create_runtime, default_registry_path, default_runtimes_dir, delete_runtime,
     install_packages_in_runtime, PythonRuntimeSpec, RuntimeRegistry,
 };
+use crate::ui::AMSAgents;
 
 impl AMSAgents {
-    pub(super) fn render_python_panel(&mut self, ui: &mut egui::Ui) {
+    pub(crate) fn render_python_panel(&mut self, ui: &mut egui::Ui) {
         // ── Poll results from background tasks ───────────────────────────
         if let Some(result) = self.python_bg_new_runtime.lock().unwrap().take() {
             match result {
@@ -81,7 +81,7 @@ impl AMSAgents {
                 if running {
                     ui.horizontal(|ui| {
                         ui.spinner();
-                        ui.label("Creating environment…");
+                        ui.label("Creating environment");
                     });
                 } else {
                     let label_ok = !self.python_label_input.trim().is_empty();
@@ -198,7 +198,7 @@ impl AMSAgents {
                                 let rt = rt_cloned.clone();
                                 let bg_msg = Arc::clone(&self.python_bg_msg);
                                 self.python_op_running.store(true, Ordering::Relaxed);
-                                self.python_status = "Installing…".to_string();
+                                self.python_status = "Installing".to_string();
                                 self.rt_handle.spawn_blocking(move || {
                                     let result =
                                         install_packages_in_runtime(&rt, &packages)
@@ -230,7 +230,7 @@ impl AMSAgents {
                             let bg_msg = Arc::clone(&self.python_bg_msg);
                             let bg_destroyed = Arc::clone(&self.python_bg_destroyed);
                             self.python_op_running.store(true, Ordering::Relaxed);
-                            self.python_status = "Destroying…".to_string();
+                            self.python_status = "Destroying".to_string();
                             self.rt_handle.spawn_blocking(move || {
                                 let reg_path = default_registry_path();
                                 let outcome =
@@ -267,7 +267,7 @@ impl AMSAgents {
 /// Each emulator receives the venv's `python` binary as the command to execute,
 /// so the user lands directly in a Python REPL with that environment active.
 fn open_runtime_terminal(
-    runtime: &crate::python_runtime::PythonRuntime,
+    runtime: &crate::python::PythonRuntime,
     status: &mut String,
 ) {
     let root = match &runtime.root_path {

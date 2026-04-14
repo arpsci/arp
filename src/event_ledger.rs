@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use crate::reproducibility::now_rfc3339_utc;
+use crate::manifest::now_rfc3339_utc;
 
 pub const EVENTS_FILE: &str = "events.jsonl";
 pub const SUMMARY_FILE: &str = "summary.json";
@@ -291,37 +291,6 @@ impl EventLedger {
         g.writer.flush().context("flush ledger")?;
         Ok(())
     }
-}
-
-/// Zip `manifest.json`, `events.jsonl`, and `summary.json` from `run_dir` into `zip_path`.
-pub fn write_run_bundle_zip(run_dir: &Path, zip_path: &Path) -> Result<()> {
-    if let Some(parent) = zip_path.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-    }
-    let file =
-        fs::File::create(zip_path).with_context(|| format!("create zip {}", zip_path.display()))?;
-    let mut zip = zip::ZipWriter::new(file);
-    let options = zip::write::SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated);
-
-    for (arc_name, disk_name) in [
-        ("manifest.json", "manifest.json"),
-        (EVENTS_FILE, EVENTS_FILE),
-        (SUMMARY_FILE, SUMMARY_FILE),
-    ] {
-        let p = run_dir.join(disk_name);
-        if !p.is_file() {
-            continue;
-        }
-        let bytes = fs::read(&p).with_context(|| format!("read {}", p.display()))?;
-        zip.start_file(arc_name, options)
-            .with_context(|| format!("zip start {}", arc_name))?;
-        use std::io::Write as _;
-        zip.write_all(&bytes)
-            .with_context(|| format!("zip write {}", arc_name))?;
-    }
-    zip.finish().context("zip finish")?;
-    Ok(())
 }
 
 #[cfg(test)]

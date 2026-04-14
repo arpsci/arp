@@ -4,12 +4,25 @@ use std::sync::atomic::Ordering;
 use eframe::egui;
 use egui_phosphor::regular;
 
-use crate::app::AMSAgents;
+use crate::ui::AMSAgents;
 
-use super::manifest_graph::sync_evaluator_researcher_activity;
+use super::manifest_ops::sync_evaluator_researcher_activity;
 use super::model::{AgentNodeKind, NodeData, NodePayload};
-use super::state::PanelTab;
-use super::viewer::BasicNodeViewer;
+use super::state::{AgentRecord, PanelTab};
+
+#[derive(Default)]
+pub(super) struct BasicNodeViewer;
+
+impl BasicNodeViewer {
+    pub(super) fn numbered_name_for_kind(agents: &[AgentRecord], kind: AgentNodeKind) -> String {
+        let idx = agents.iter().filter(|a| a.data.kind == kind).count() + 1;
+        format!("{} {}", kind.label(), idx)
+    }
+
+    pub(super) fn show_body(&mut self, id: usize, ui: &mut egui::Ui, agents: &mut [AgentRecord]) {
+        super::body::show_node_body(id, ui, agents);
+    }
+}
 
 impl AMSAgents {
     pub(crate) fn render_nodes_panel(&mut self, ui: &mut egui::Ui) {
@@ -425,7 +438,7 @@ impl AMSAgents {
                         let eval_global_id = e.global_id.clone();
                         handle.spawn(async move {
                             let ollama_in = format!("{}\n{}", instruction, message);
-                            match crate::adk_integration::send_to_ollama(
+                            match crate::ollama::send_to_ollama(
                                 ollama_host.as_str(),
                                 &instruction,
                                 &message,
@@ -498,7 +511,7 @@ impl AMSAgents {
                                     }
                                 }
                                 Err(e) => {
-                                    if e.to_string() != crate::adk_integration::OLLAMA_STOPPED_MSG
+                                    if e.to_string() != crate::ollama::OLLAMA_STOPPED_MSG
                                     {
                                         if let Some(ref l) = ledger {
                                             let _ = l.append_with_hashes(
@@ -578,7 +591,7 @@ impl AMSAgents {
                         let res_global_id = r.global_id.clone();
                         handle.spawn(async move {
                             let ollama_in = format!("{}\n{}", instruction, message);
-                            match crate::adk_integration::send_to_ollama(
+                            match crate::ollama::send_to_ollama(
                                 ollama_host.as_str(),
                                 &instruction,
                                 &message,
@@ -621,7 +634,7 @@ impl AMSAgents {
                                 }
                                 Err(e) => {
                                     if e.to_string()
-                                        != crate::adk_integration::OLLAMA_STOPPED_MSG
+                                        != crate::ollama::OLLAMA_STOPPED_MSG
                                     {
                                         if let Some(ref l) = ledger {
                                             let _ = l.append_with_hashes(

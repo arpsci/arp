@@ -1,6 +1,5 @@
 use super::AMSAgents;
 use eframe::egui;
-use std::path::PathBuf;
 
 /// Preset values for how many recent agent messages are included in the next dialogue prompt.
 const CHAT_HISTORY_PRESETS: &[usize] = &[1, 2, 3, 5, 8, 10, 15, 20, 30, 50];
@@ -115,7 +114,7 @@ impl AMSAgents {
                         let handle = self.rt_handle.clone();
                         let ollama_host = self.ollama_host.clone();
                         handle.spawn(async move {
-                            let models = crate::adk_integration::fetch_ollama_models(&ollama_host)
+                            let models = crate::ollama::fetch_ollama_models(&ollama_host)
                                 .await
                                 .unwrap_or_default();
                             *models_arc.lock().unwrap() = models;
@@ -142,7 +141,7 @@ impl AMSAgents {
                         let model = self.selected_ollama_model.clone();
                         let ollama_host = self.ollama_host.clone();
                         handle.spawn(async move {
-                            match crate::adk_integration::test_ollama(
+                            match crate::ollama::test_ollama(
                                 ollama_host.as_str(),
                                 if model.trim().is_empty() {
                                     None
@@ -226,58 +225,6 @@ impl AMSAgents {
 
             if policy_changed {
                 self.sync_http_policy();
-            }
-
-            ui.add_space(6.0);
-            ui.label(egui::RichText::new("Reproducibility").strong().size(12.0));
-            ui.separator();
-            ui.horizontal(|ui| {
-                ui.label("Export Manifest Path:");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.manifest_export_path).desired_width(300.0),
-                );
-                if ui.button("Export Manifest").clicked() {
-                    let export_path = PathBuf::from(self.manifest_export_path.clone());
-                    if let Err(e) = self.export_manifest_to_path(export_path) {
-                        self.manifest_status_message = format!("Manifest export failed: {e}");
-                    }
-                }
-            });
-            ui.horizontal(|ui| {
-                ui.label("Run From Manifest Path:");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.manifest_import_path).desired_width(300.0),
-                );
-                if ui.button("Run From Manifest").clicked() {
-                    let import_path = PathBuf::from(self.manifest_import_path.clone());
-                    if let Err(e) = self.run_from_manifest_path(import_path) {
-                        self.manifest_status_message = format!("Manifest run failed: {e}");
-                    }
-                }
-            });
-            ui.horizontal(|ui| {
-                ui.label("Run bundle (zip) path:");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.bundle_export_path).desired_width(300.0),
-                );
-                if ui
-                    .button("Download Run Bundle")
-                    .on_hover_text(
-                        "Zip manifest.json, events.jsonl, and summary.json for the current run.",
-                    )
-                    .clicked()
-                {
-                    let p = PathBuf::from(self.bundle_export_path.trim());
-                    if let Err(e) = self.download_run_bundle_to_path(p) {
-                        self.manifest_status_message = format!("Run bundle failed: {e}");
-                    }
-                }
-            });
-            if !self.manifest_status_message.trim().is_empty() {
-                ui.label(&self.manifest_status_message);
-            }
-            if self.read_only_replay_mode {
-                ui.label("Replay mode is active.");
             }
         });
     }

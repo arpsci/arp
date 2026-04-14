@@ -2,15 +2,15 @@ use std::path::PathBuf;
 
 use eframe::egui;
 
-use crate::app::AMSAgents;
-use crate::reproducibility::{
+use crate::ui::AMSAgents;
+use crate::manifest::{
     APP_NAME, GraphSnapshot, MANIFEST_VERSION, ManifestNode, RunContext, RunManifest,
     RunRuntimeSettings, canonical_graph_signature, derive_experiment_id, export_manifest_to,
     new_run_id, now_rfc3339_utc, read_manifest, runs_root, write_manifest,
 };
 
-use super::manifest_graph::sync_evaluator_researcher_activity;
 use super::model::{NodeData, NodePayload};
+use super::state::AgentRecord;
 
 fn json_opt_usize(config: &serde_json::Value, key: &str) -> Option<usize> {
     config.get(key).and_then(|v| {
@@ -20,6 +20,20 @@ fn json_opt_usize(config: &serde_json::Value, key: &str) -> Option<usize> {
             v.as_u64().map(|u| u as usize)
         }
     })
+}
+
+pub(super) fn sync_evaluator_researcher_activity(agents: &mut [AgentRecord]) {
+    for record in agents.iter_mut() {
+        match &mut record.data.payload {
+            NodePayload::Evaluator(evaluator) => {
+                evaluator.active = evaluator.evaluate_all_workers || evaluator.worker_node.is_some();
+            }
+            NodePayload::Researcher(researcher) => {
+                researcher.active = researcher.worker_node.is_some();
+            }
+            _ => {}
+        }
+    }
 }
 
 impl AMSAgents {
@@ -166,18 +180,6 @@ impl AMSAgents {
         self.current_manifest = Some(manifest);
         self.manifest_status_message = format!("Manifest saved: {}", path.display());
         Ok(path)
-    }
-
-    pub(crate) fn export_manifest_to_path(&mut self, path: PathBuf) -> anyhow::Result<()> {
-        let manifest = if let Some(existing) = &self.current_manifest {
-            existing.clone()
-        } else {
-            self.build_run_manifest(None, self.read_only_replay_mode)?
-        };
-        export_manifest_to(&manifest, &path)?;
-        self.current_manifest = Some(manifest);
-        self.manifest_status_message = format!("Manifest exported: {}", path.display());
-        Ok(())
     }
 
     fn clear_graph(&mut self) {
@@ -337,20 +339,6 @@ impl AMSAgents {
         Ok(())
     }
 
-    pub(crate) fn load_manifest_from_path(&mut self, path: PathBuf) -> anyhow::Result<()> {
-        let manifest = read_manifest(&path)?;
-        self.apply_manifest_graph_and_runtime(&manifest)?;
-        self.read_only_replay_mode = true;
-        self.current_run_context = Some(RunContext {
-            manifest_version: manifest.manifest_version.clone(),
-            experiment_id: manifest.experiment_id.clone(),
-            run_id: manifest.run_id.clone(),
-        });
-        self.current_manifest = Some(manifest);
-        self.manifest_status_message = format!("Loaded replay manifest: {}", path.display());
-        Ok(())
-    }
-
     pub(crate) fn save_agents_workspace_to_path(&mut self, path: PathBuf) -> anyhow::Result<()> {
         let manifest = self.build_run_manifest(None, false)?;
         export_manifest_to(&manifest, &path)?;
@@ -366,29 +354,6 @@ impl AMSAgents {
         self.current_run_context = None;
         self.current_manifest = Some(manifest);
         self.manifest_status_message = format!("Loaded workspace: {}", path.display());
-        Ok(())
-    }
-
-    pub(crate) fn run_from_manifest_path(&mut self, path: PathBuf) -> anyhow::Result<()> {
-        self.load_manifest_from_path(path)?;
-        let _ = self.run_graph();
-        Ok(())
-    }
-
-    /// Writes `manifest.json`, `events.jsonl`, and `summary.json` from the current run into a zip.
-    pub(crate) fn download_run_bundle_to_path(&mut self, zip_path: PathBuf) -> anyhow::Result<()> {
-        let ctx = self.current_run_context.as_ref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "no active run context; start the graph or load a manifest with a run id"
-            )
-        })?;
-        let run_dir =
-            crate::reproducibility::run_dir(&runs_root(), &ctx.experiment_id, &ctx.run_id);
-        if !run_dir.is_dir() {
-            anyhow::bail!("run directory not found: {}", run_dir.display());
-        }
-        crate::event_ledger::write_run_bundle_zip(&run_dir, &zip_path)?;
-        self.manifest_status_message = format!("Run bundle written: {}", zip_path.display());
         Ok(())
     }
 }

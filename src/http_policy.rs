@@ -33,10 +33,12 @@ fn parse_bool_env(name: &str, default: bool) -> bool {
     }
 }
 
-pub fn policy_from_env() -> HttpPolicy {
-    HttpPolicy {
-        air_gap_enabled: parse_bool_env("AMS_AIR_GAP", false),
-        allow_local_ollama: parse_bool_env("AMS_ALLOW_LOCAL_OLLAMA", true),
+impl HttpPolicy {
+    pub fn from_env() -> HttpPolicy {
+        HttpPolicy {
+            air_gap_enabled: parse_bool_env("AMS_AIR_GAP", false),
+            allow_local_ollama: parse_bool_env("AMS_ALLOW_LOCAL_OLLAMA", true),
+        }
     }
 }
 
@@ -48,7 +50,7 @@ pub fn set_policy(policy: HttpPolicy) {
 }
 
 pub fn current_policy() -> HttpPolicy {
-    let cell = HTTP_POLICY.get_or_init(|| RwLock::new(policy_from_env()));
+    let cell = HTTP_POLICY.get_or_init(|| RwLock::new(HttpPolicy::from_env()));
     match cell.read() {
         Ok(guard) => *guard,
         Err(_) => HttpPolicy::default(),

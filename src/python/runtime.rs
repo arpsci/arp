@@ -33,7 +33,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::event_ledger::EventLedger;
-use crate::reproducibility::now_rfc3339_utc;
+use crate::manifest::now_rfc3339_utc;
 
 // ─── Counters for unique IDs ───────────────────────────────────────────────
 

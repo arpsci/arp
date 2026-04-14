@@ -1,11 +1,10 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::app::AMSAgents;
+use crate::ui::AMSAgents;
 use crate::event_ledger::EventLedger;
-use crate::reproducibility::runs_root;
-
-use super::manifest_graph::sync_evaluator_researcher_activity;
+use crate::manifest::runs_root;
+use super::manifest_ops::sync_evaluator_researcher_activity;
 use super::model::NodePayload;
 use super::play_plan::{
     PlayConversationPairJson, PlayWorkerInPlayJson, build_conversation_sidecar_from_agents,
@@ -19,9 +18,6 @@ impl AMSAgents {
             *flag.lock().unwrap() = false;
         }
         self.conversation_loop_handles.clear();
-        if let Some(ledger) = self.event_ledger.take() {
-            let _ = ledger.try_finalize_run_stopped("graph_stopped");
-        }
         self.conversation_graph_running
             .store(false, Ordering::Release);
         *self.last_message_in_chat.lock().unwrap() = None;
@@ -296,7 +292,7 @@ impl AMSAgents {
     /// Keys the async loop by `loop_key_node_id` (first worker in each pair). Conversation output nodes were removed; pairing is automatic from eligible workers.
     fn start_conversation_from_node_worker_resolved(
         &mut self,
-        sidecars: Arc<crate::agent_conversation_loop::ConversationSidecarConfig>,
+        sidecars: Arc<crate::conversation_sidecars::ConversationSidecarConfig>,
         run_generation: u64,
         run_generation_counter: Arc<AtomicU64>,
         loops_remaining_in_run: Arc<AtomicUsize>,

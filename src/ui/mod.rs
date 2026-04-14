@@ -1,20 +1,19 @@
 use crate::agent_entities::{Evaluator, Researcher};
 use crate::event_ledger::EventLedger;
 use crate::http_policy::HttpPolicy;
-use crate::reproducibility::{RunContext, RunManifest};
+use crate::manifest::{RunContext, RunManifest};
 use eframe::egui;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex};
 use tokio::runtime::Handle;
 
 mod nodes_panel;
-mod python_panel;
 mod settings_panel;
 
 use crate::vault::MasterVault;
 
 pub struct AMSAgents {
-    rt_handle: Handle,
+    pub(crate) rt_handle: Handle,
     ollama_models: Arc<Mutex<Vec<String>>>,
     ollama_models_loading: Arc<Mutex<bool>>,
     selected_ollama_model: String,
@@ -41,12 +40,8 @@ pub struct AMSAgents {
     pub(super) ollama_run_epoch: Arc<AtomicU64>,
     current_run_context: Option<RunContext>,
     current_manifest: Option<RunManifest>,
-    manifest_export_path: String,
-    manifest_import_path: String,
     /// JSON path for Agents tab Load / Save (graph + runtime).
     agents_workspace_path: String,
-    /// Target path for "Download Run Bundle" (zip).
-    pub(super) bundle_export_path: String,
     /// Append-only ledger for the active run (`events.jsonl`), if any.
     pub(super) event_ledger: Option<Arc<EventLedger>>,
     manifest_status_message: String,
@@ -58,22 +53,22 @@ pub struct AMSAgents {
     theme_applied: bool,
     phosphor_fonts_installed: bool,
     // ── Python runtime panel ──────────────────────────────────────────────
-    python_label_input: String,
-    python_interpreter_input: String,
-    python_pkg_input: String,
-    python_active_runtime: Option<crate::python_runtime::PythonRuntime>,
-    python_op_running: Arc<AtomicBool>,
-    python_status: String,
-    python_bg_new_runtime:
-        Arc<Mutex<Option<Result<crate::python_runtime::PythonRuntime, String>>>>,
-    python_bg_msg: Arc<Mutex<Option<String>>>,
-    python_bg_destroyed: Arc<AtomicBool>,
+    pub(crate) python_label_input: String,
+    pub(crate) python_interpreter_input: String,
+    pub(crate) python_pkg_input: String,
+    pub(crate) python_active_runtime: Option<crate::python::PythonRuntime>,
+    pub(crate) python_op_running: Arc<AtomicBool>,
+    pub(crate) python_status: String,
+    pub(crate) python_bg_new_runtime:
+        Arc<Mutex<Option<Result<crate::python::PythonRuntime, String>>>>,
+    pub(crate) python_bg_msg: Arc<Mutex<Option<String>>>,
+    pub(crate) python_bg_destroyed: Arc<AtomicBool>,
     nodes_panel: nodes_panel::NodesPanelState,
 }
 
 impl AMSAgents {
     pub fn new(rt_handle: Handle) -> Self {
-        let http_policy = crate::http_policy::policy_from_env();
+        let http_policy = crate::http_policy::HttpPolicy::from_env();
         crate::http_policy::set_policy(http_policy);
 
         Self {
@@ -106,10 +101,7 @@ impl AMSAgents {
             ollama_run_epoch: Arc::new(AtomicU64::new(0)),
             current_run_context: None,
             current_manifest: None,
-            manifest_export_path: "runs/exported-manifest.json".to_string(),
-            manifest_import_path: "runs/import-manifest.json".to_string(),
             agents_workspace_path: "runs/agents-workspace.json".to_string(),
-            bundle_export_path: "runs/run-bundle.zip".to_string(),
             event_ledger: None,
             manifest_status_message: String::new(),
             read_only_replay_mode: false,
@@ -165,7 +157,7 @@ impl eframe::App for AMSAgents {
             let handle = self.rt_handle.clone();
             let ollama_host = self.ollama_host.clone();
             handle.spawn(async move {
-                let models = crate::adk_integration::fetch_ollama_models(&ollama_host)
+                let models = crate::ollama::fetch_ollama_models(&ollama_host)
                     .await
                     .unwrap_or_default();
                 *models_arc.lock().unwrap() = models;
