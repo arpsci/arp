@@ -289,7 +289,8 @@ fn open_runtime_terminal(
     let python_str  = python_bin.to_string_lossy().to_string();
     let venv_str    = root.to_string_lossy().to_string();
     let system_path = std::env::var("PATH").unwrap_or_default();
-    let venv_path   = format!("{}:{system_path}", bin_dir.display());
+    let path_sep = if cfg!(windows) { ';' } else { ':' };
+    let venv_path   = format!("{}{}{}", bin_dir.display(), path_sep, system_path);
 
     #[cfg(target_os = "macos")]
     {
@@ -303,13 +304,53 @@ fn open_runtime_terminal(
 
     #[cfg(windows)]
     {
-        match std::process::Command::new("cmd")
-            .args(["/k", &python_str])
+        use std::os::windows::process::CommandExt;
+
+        // Windows 11 reports NT 10.0 with build >= 22000.
+        fn is_windows_11() -> bool {
+            let out = std::process::Command::new("cmd")
+                .args(["/C", "ver"])
+                .output();
+            let text = match out {
+                Ok(o) => String::from_utf8_lossy(&o.stdout).to_string(),
+                Err(_) => return false,
+            };
+            let version = match text
+                .split("Version")
+                .nth(1)
+                .map(|s| s.trim())
+                .and_then(|s| s.trim_end_matches(']').split_whitespace().next())
+            {
+                Some(v) => v,
+                None => return false,
+            };
+            let mut parts = version.split('.');
+            let _major = parts.next();
+            let _minor = parts.next();
+            let build = parts.next().and_then(|p| p.parse::<u32>().ok()).unwrap_or(0);
+            build >= 22_000
+        }
+
+        let mut cmd = std::process::Command::new("cmd");
+        cmd.args(["/k", &python_str])
             .env("VIRTUAL_ENV", &venv_str)
-            .env("PATH", &venv_path)
-            .spawn()
-        {
-            Ok(_) => *status = "Opened Python REPL in cmd.exe.".to_string(),
+            .env("PATH", &venv_path);
+
+        let win11 = is_windows_11();
+
+        if win11 {
+            const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+            cmd.creation_flags(CREATE_NEW_CONSOLE);
+        }
+
+        match cmd.spawn() {
+            Ok(_) => {
+                if win11 {
+                    *status = "Opened Python REPL in a new cmd.exe window (Windows 11).".to_string();
+                } else {
+                    *status = "Opened Python REPL in cmd.exe.".to_string();
+                }
+            }
             Err(e) => *status = format!("Could not open cmd.exe: {e}"),
         }
     }

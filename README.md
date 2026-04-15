@@ -26,6 +26,9 @@ Agents Research Platform for HCI and Cognitive Sciences (Dashboard).
 ```sh
 # One-time vault: interactive prompt writes `runs/.master_hash` (PHC Argon2id hash for the password gate)
 cargo run --bin gen_master_hash
+# For Windows 11 on a separate target/ dir
+# $env:CARGO_TARGET_DIR="target-hash-win11"; cargo run --bin gen_master_hash
+
 
 # Development: run the application (`target/debug/`)
 cargo run
