@@ -64,30 +64,22 @@ impl AMSAgents {
                 ui.label(egui::RichText::new("Settings Ollama").strong());
             });
             let _ = settings_fold.body(|ui| {
+                let models = ui_state.ollama.models.lock().unwrap().clone();
+                if self.selected_ollama_model.is_empty() {
+                    if let Some(first) = models.first() {
+                        self.selected_ollama_model = first.clone();
+                    }
+                }
+
                 ui.horizontal(|ui| {
                     ui.label("API host / URL:");
                     ui.add(egui::TextEdit::singleline(&mut self.ollama_host).desired_width(300.0));
                 });
-            });
 
-            let test_fold = egui::collapsing_header::CollapsingState::load_with_default_open(
-                ui.ctx(),
-                ui.make_persistent_id("ollama_section_test"),
-                true,
-            )
-            .show_header(ui, |ui| {
-                ui.label(egui::RichText::new("Test Ollama").strong());
-            });
-            let _ = test_fold.body(|ui| {
+                ui.add_space(5.0);
                 ui.horizontal(|ui| {
-                    ui.label("Ollama Model:");
-                    let models = ui_state.ollama.models.lock().unwrap().clone();
-                    if self.selected_ollama_model.is_empty() {
-                        if let Some(first) = models.first() {
-                            self.selected_ollama_model = first.clone();
-                        }
-                    }
-                    egui::ComboBox::from_id_salt("ollama_model_selector")
+                    ui.label("Global Ollama Model:");
+                    egui::ComboBox::from_id_salt("ollama_model_selector_global")
                         .selected_text(if self.selected_ollama_model.is_empty() {
                             "Select model".to_string()
                         } else {
@@ -124,6 +116,32 @@ impl AMSAgents {
                             ctx.request_repaint();
                         });
                     }
+                });
+                ui.label(
+                    egui::RichText::new("This model is used globally by agent and sidecar inference.")
+                        .small()
+                        .weak(),
+                );
+            });
+
+            let test_fold = egui::collapsing_header::CollapsingState::load_with_default_open(
+                ui.ctx(),
+                ui.make_persistent_id("ollama_section_test"),
+                true,
+            )
+            .show_header(ui, |ui| {
+                ui.label(egui::RichText::new("Test Ollama").strong());
+            });
+            let _ = test_fold.body(|ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Using global model:");
+                    ui.label(
+                        if self.selected_ollama_model.trim().is_empty() {
+                            "(none selected)".to_string()
+                        } else {
+                            self.selected_ollama_model.clone()
+                        },
+                    );
                 });
                 ui.add_space(5.0);
 
