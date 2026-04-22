@@ -1,8 +1,6 @@
 target/
 
 
-
-
 Cargo.lock
 
 python/
@@ -11,3 +9,5 @@ python/
 agents-workspace.json
 
 timings.jsonl
+
+exp_*/

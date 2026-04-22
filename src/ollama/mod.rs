@@ -61,6 +61,7 @@ pub async fn send_to_ollama(
                 prompt_token_count: None,
                 candidates_token_count: None,
                 total_token_count: None,
+                prompt: Some(input.to_string()),
             });
             return Err(anyhow::anyhow!(OLLAMA_STOPPED_MSG));
         }
@@ -98,6 +99,7 @@ pub async fn send_to_ollama(
                 prompt_token_count: None,
                 candidates_token_count: None,
                 total_token_count: None,
+                prompt: Some(input.to_string()),
             });
             return Err(e);
         }
@@ -137,6 +139,7 @@ pub async fn send_to_ollama(
                     .as_ref()
                     .map(|u| u.candidates_token_count),
                 total_token_count: token_usage.as_ref().map(|u| u.total_token_count),
+                prompt: Some(input.to_string()),
             });
             Ok(streaming.response)
         }
@@ -162,6 +165,7 @@ pub async fn send_to_ollama(
                 prompt_token_count: None,
                 candidates_token_count: None,
                 total_token_count: None,
+                prompt: Some(input.to_string()),
             });
             Err(e)
         }
@@ -217,6 +221,7 @@ pub async fn test_ollama(
                     .as_ref()
                     .map(|u| u.candidates_token_count),
                 total_token_count: streaming.usage.as_ref().map(|u| u.total_token_count),
+                prompt: Some(input.to_string()),
             });
             Ok(streaming.response)
         }
@@ -242,6 +247,7 @@ pub async fn test_ollama(
                 prompt_token_count: None,
                 candidates_token_count: None,
                 total_token_count: None,
+                prompt: Some(input.to_string()),
             });
             Err(e)
         }

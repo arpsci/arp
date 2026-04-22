@@ -84,6 +84,8 @@ pub struct InferenceTimingEvent {
     pub candidates_token_count: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total_token_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
