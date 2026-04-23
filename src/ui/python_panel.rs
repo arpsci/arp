@@ -127,7 +127,9 @@ impl AMSAgents {
                 // Clone display data upfront to release the borrow on python_active_runtime
                 // so button click handlers can freely borrow other self fields.
                 let (rt_id, rt_label, rt_version, rt_path, rt_state, rt_cloned) = {
-                    let rt = panel.active_runtime.as_ref().unwrap();
+                    let Some(rt) = panel.active_runtime.as_ref() else {
+                        return;
+                    };
                     (
                         rt.id.clone(),
                         rt.label.clone(),

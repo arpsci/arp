@@ -253,6 +253,7 @@ mod tests {
             prompt_token_count: Some(10),
             candidates_token_count: Some(20),
             total_token_count: Some(30),
+            prompt: None,
         });
 
         let raw = fs::read_to_string(path).expect("read metrics file");

@@ -19,8 +19,6 @@ struct ConversationMessage {
     agent_id: usize,
     agent_name: String,
     message: String,
-    #[allow(dead_code)]
-    turn: usize,
 }
 
 struct ConversationHistory {
@@ -36,12 +34,11 @@ impl ConversationHistory {
         }
     }
 
-    fn add_message(&mut self, agent_id: usize, agent_name: String, message: String, turn: usize) {
+    fn add_message(&mut self, agent_id: usize, agent_name: String, message: String) {
         self.messages.push(ConversationMessage {
             agent_id,
             agent_name,
             message,
-            turn,
         });
         if self.messages.len() > self.max_history {
             self.messages.remove(0);
@@ -333,7 +330,7 @@ pub async fn start_conversation_loop(
                         }),
                     );
                 }
-                history.add_message(sender_id, sender_name.clone(), response.clone(), turn);
+                history.add_message(sender_id, sender_name.clone(), response.clone());
                 let event = format!(
                     "SRC{}:TURN:{}::MSG::{}",
                     message_event_source_id, turn, response

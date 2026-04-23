@@ -430,7 +430,6 @@ impl AMSAgents {
                         let num_predict = e.num_predict.clone();
                         let endpoint = self.http_endpoint.clone();
                         let ollama_host = self.ollama_host.clone();
-                        let has_output_nodes = has_output_nodes;
                         let run_context = self.current_run_context.clone();
                         let ctx = ctx.clone();
                         let handle = self.rt_handle.clone();
@@ -593,7 +592,6 @@ impl AMSAgents {
                         let num_predict = r.num_predict.clone();
                         let endpoint = self.http_endpoint.clone();
                         let ollama_host = self.ollama_host.clone();
-                        let has_output_nodes = has_output_nodes;
                         let run_context = self.current_run_context.clone();
                         let ctx = ctx.clone();
                         let handle = self.rt_handle.clone();
