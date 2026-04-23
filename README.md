@@ -10,21 +10,6 @@ Agents Research Platform for HCI and Cognitive Sciences (Dashboard).
 - Local and field-first architecture
 
 
-### Dependencies
-
-- eframe
-- egui
-- catppuccin-egui
-- egui-phosphor
-- tokio
-- adk-agent
-- adk-model
-- adk-runner
-- reqwest
-- rocket
-- serde
-
-
 ### Building
 
 ```sh
@@ -47,18 +32,33 @@ AMS_WEB_ENABLED=true cargo run
 cargo build --release
 ```
 
+### uv Tests
+
+```sh
+Being done
+```
+
+### Dependencies
+
+- eframe
+- egui
+- catppuccin-egui
+- egui-phosphor
+- tokio
+- adk-agent
+- adk-model
+- adk-runner
+- reqwest
+- rocket
+- serde
+
+
 ### Reproducibility
 
 - The `./runs/` folder is the application persisted state and run history:
     1) a workspace snapshot you can load/save outside a run,
     2) per-experiment/per-run execution artifacts
 
-
-### uv Tests
-
-```sh
-Being done
-```
 
 ### Security
 
