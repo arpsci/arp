@@ -12,6 +12,8 @@ mod settings_panel;
 pub(crate) struct OllamaUiState {
 	pub(crate) models: Arc<Mutex<Vec<String>>>,
 	pub(crate) models_loading: Arc<Mutex<bool>>,
+	pub(crate) test_status: Arc<Mutex<String>>,
+	pub(crate) test_running: Arc<AtomicBool>,
 }
 
 impl Default for OllamaUiState {
@@ -19,6 +21,8 @@ impl Default for OllamaUiState {
 		Self {
 			models: Arc::new(Mutex::new(Vec::new())),
 			models_loading: Arc::new(Mutex::new(false)),
+			test_status: Arc::new(Mutex::new(String::new())),
+			test_running: Arc::new(AtomicBool::new(false)),
 		}
 	}
 }
