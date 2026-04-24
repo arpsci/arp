@@ -75,10 +75,28 @@ impl ChatExample {
 			self.rooms = rooms;
 		}
 
+		pub fn add_room(&mut self, name: String, store: &mut super::store::Store) {
+			if let Ok(id) = store.create_conversation() {
+				self.rooms.push(Room::new(id.clone(), name));
+				self.selected_room = Some(id);
+			}
+		}
+
+		pub fn rename_room(&mut self, id: &str, new_name: String, store: &mut super::store::Store) {
+			// For now, just update the local name; in a real app, persist to DB
+			if let Some(room) = self.rooms.iter_mut().find(|r| r.id == id) {
+				room.name = new_name.clone();
+			}
+			// TODO: persist name to DB if schema supports it
+		}
+
 		pub fn sidebar_ui(&mut self, ui: &mut Ui) {
 			use egui::{RichText, Sense};
 			let sidebar_width = 180.0;
 			let mut open = &mut self.sidebar_open;
+			let mut new_room_name = String::new();
+			let mut rename_id: Option<String> = None;
+			let mut rename_text = String::new();
 			egui::SidePanel::left("rooms_sidebar")
 				.resizable(false)
 				.min_width(sidebar_width)
@@ -87,16 +105,40 @@ impl ChatExample {
 						ui.heading("Rooms");
 					});
 					ui.separator();
-					for room in &self.rooms {
+					// Add new room
+					ui.horizontal(|ui| {
+						ui.label("New:");
+						let resp = ui.text_edit_singleline(&mut new_room_name);
+						if ui.button("+").clicked() && !new_room_name.trim().is_empty() {
+							// Use a callback to add room (store must be passed in real app)
+							// Placeholder: self.add_room(new_room_name.clone(), store)
+							// For now, just add locally
+							let id = format!("room_{}", self.rooms.len() + 1);
+							self.rooms.push(Room::new(id.clone(), new_room_name.clone()));
+							self.selected_room = Some(id);
+							new_room_name.clear();
+						}
+					});
+					ui.separator();
+					for room in &mut self.rooms {
 						let selected = self.selected_room.as_ref().map_or(false, |id| id == &room.id);
-						let label = if selected {
-							RichText::new(&room.name).strong()
-						} else {
-							RichText::new(&room.name)
-						};
-						let resp = ui.selectable_label(selected, label);
+						let mut editing = false;
+						// Double-click to rename
+						let resp = ui.selectable_label(selected, RichText::new(&room.name));
+						if resp.double_clicked() {
+							rename_id = Some(room.id.clone());
+							rename_text = room.name.clone();
+							editing = true;
+						}
 						if resp.clicked() {
 							self.selected_room = Some(room.id.clone());
+						}
+						if editing {
+							let mut text = rename_text.clone();
+							if ui.text_edit_singleline(&mut text).lost_focus() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+								self.rename_room(&room.id, text.clone(), &mut super::store::Store::open("metrics/overview_chat.sqlite").unwrap());
+								rename_id = None;
+							}
 						}
 					}
 				});
