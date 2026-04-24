@@ -8,7 +8,7 @@ use egui_phosphor::regular;
 
 use crate::agents::AMSAgents;
 use crate::agents::nodes_panel::{
-    sync_evaluator_researcher_activity, AgentNodeKind, AgentRecord, NodeData, NodePayload,
+    sync_evaluator_researcher_activity, AgentNodeKind, AgentRecord, NodePayload,
     PanelTab,
 };
 use crate::ui::AMSAgentsUiState;
@@ -17,10 +17,10 @@ use crate::ui::AMSAgentsUiState;
 pub(super) struct BasicNodeViewer;
 
 impl BasicNodeViewer {
-    pub(super) fn numbered_name_for_kind(agents: &[AgentRecord], kind: AgentNodeKind) -> String {
-        let idx = agents.iter().filter(|a| a.data.kind == kind).count() + 1;
-        format!("{} {}", kind.label(), idx)
-    }
+    // pub(super) fn numbered_name_for_kind(agents: &[AgentRecord], kind: AgentNodeKind) -> String {
+    //     let idx = agents.iter().filter(|a| a.data.kind == kind).count() + 1;
+    //     format!("{} {}", kind.label(), idx)
+    // }
 
     pub(super) fn show_body(&mut self, id: usize, ui: &mut egui::Ui, agents: &mut [AgentRecord]) {
         super::body::show_node_body(id, ui, agents);
@@ -106,96 +106,98 @@ impl AMSAgents {
                     });
                     ui.separator();
 
+                    
+
                     if self.nodes_panel.active_tab == PanelTab::Overview {
+                        use crate::ui::overview_chat::{chat::{ChatExample, Room}, store::Store};
+                        use std::sync::Mutex;
+                        use std::path::PathBuf;
+                        // Static path for demonstration; in real app, make this configurable
+                        let db_path = PathBuf::from("metrics/overview_chat.sqlite");
+                        let store = Store::open(db_path).expect("Failed to open chat store");
 
+                        // List rooms (conversations)
+                        let convs = store.list_conversations(50).unwrap_or_default();
+                        let mut rooms: Vec<Room> = convs.iter().map(|c| Room::new(c.id.clone(), format!("Room {}", &c.id[..8]))).collect();
+                        if rooms.is_empty() {
+                            // Always have at least one room
+                            let id = store.create_conversation().unwrap();
+                            rooms.push(Room::new(id.clone(), format!("Room {}", &id[..8])));
+                        }
 
-                        // Overview panel with left bar and right chat area
+                        // Static ChatExample for demonstration; in real app, store in ui_state
+                        static mut CHAT: Option<Mutex<ChatExample>> = None;
+                        let chat = unsafe {
+                            CHAT.get_or_insert_with(|| Mutex::new(ChatExample::new()))
+                        };
+                        let mut chat = chat.lock().unwrap();
+                        chat.set_rooms(rooms.clone());
+                        if chat.selected_room.is_none() {
+                            chat.selected_room = Some(rooms[0].id.clone());
+                        }
+                        // When selected_room changes, load messages
+                        if let Some(selected_id) = &chat.selected_room {
+                            let (msgs, ts) = store.load_messages(selected_id).unwrap_or((vec![], vec![]));
+                            chat.hydrate(msgs, ts);
+                        }
 
-                        // Parent frame occupying available height
-                        
-
-                        
-                        egui::Frame::default()
-                            .fill(ui.visuals().panel_fill)
-                            .stroke(egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color))
-                            .show(ui, |ui| {
-                                ui.allocate_ui_with_layout(
-
-                                    
-                                    egui::vec2(ui.available_width(), ui.available_height()),
-                                    egui::Layout::left_to_right(egui::Align::Min),
-                                    |ui| {
-
-                                        ui.add_space(4.0);
-
-
-                                        // Left bar with true top margin
-
-                                        ui.vertical(|ui| {
-                                            ui.add_space(4.0); // true top margin for the left bar frame
-                                            egui::Frame::default()
-                                                .stroke(egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color))
-                                                .inner_margin(egui::Margin::same(0))
-                                                .show(ui, |ui| {
-                                                    ui.set_width(140.0);
-                                                    ui.set_height(ui.available_height() - 4.0); // subtract the top margin
-                                                    ui.label("Left bar");
-                                                });
-                                        });
-
-                                        // Right area with inbox from ui_state
-
-                                        ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-                                            
-                                            ui.add_space(6.0); // Do not remove
-
-                                            // Input row, separator, and button always at the bottom
-                                            ui.horizontal(|ui| {
-                                                let input = &mut ui_state.inbox_input;
-                                                let text_edit = egui::TextEdit::singleline(input).hint_text("Type a message...");
-                                                let response = ui.add(text_edit);
-                                                let send_clicked = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))
-                                                    || ui.button("Send").clicked();
-                                                if send_clicked && !input.trim().is_empty() {
-                                                    let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
-                                                    ui_state.inbox_messages.push((timestamp, input.trim().to_string()));
-                                                    input.clear();
-                                                }
+                        ui.horizontal(|ui| {
+                            // Left bar: chat room sidebar
+                            ui.vertical(|ui| {
+                                chat.sidebar_ui(ui);
+                            });
+                            // Right: message bubbles area (unchanged)
+                            ui.vertical(|ui| {
+                                // Copy the original message bubbles area here
+                                let scroll_height = ui.available_height() - 6.0;
+                                egui::Frame::default()
+                                    .stroke(egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color))
+                                    .inner_margin(egui::Margin::same(0))
+                                    .show(ui, |ui| {
+                                        ui.set_width(ui.available_width() - 4.0); // subtract horizontal padding
+                                        ui.set_height(scroll_height.max(40.0));
+                                        egui::Frame::new()
+                                            .inner_margin(egui::Margin::same(4))
+                                            .show(ui, |ui| {
+                                                egui::ScrollArea::vertical()
+                                                    .stick_to_bottom(true)
+                                                    .show(ui, |ui| {
+                                                        ui.vertical(|ui| {
+                                                            ui.set_width(ui.available_width());
+                                                            let len = chat.messages.len();
+                                                            for (i, msg) in chat.messages.iter().enumerate() {
+                                                                ui.horizontal(|ui| {
+                                                                    // Timestamp bubble
+                                                                    egui::Frame::new()
+                                                                        .fill(ui.visuals().widgets.inactive.bg_fill)
+                                                                        .stroke(egui::Stroke::new(0.5, ui.visuals().widgets.noninteractive.bg_stroke.color))
+                                                                        .corner_radius(egui::CornerRadius::same(6))
+                                                                        .inner_margin(egui::Margin::symmetric(6, 2))
+                                                                        .show(ui, |ui| {
+                                                                            let ts = ChatExample::display_time_for_message(msg);
+                                                                            ui.label(ts);
+                                                                        });
+                                                                    // Message bubble
+                                                                    egui::Frame::new()
+                                                                        .fill(ui.visuals().extreme_bg_color)
+                                                                        .stroke(egui::Stroke::new(0.5, ui.visuals().widgets.noninteractive.bg_stroke.color))
+                                                                        .corner_radius(egui::CornerRadius::same(6))
+                                                                        .inner_margin(egui::Margin::symmetric(8, 4))
+                                                                        .show(ui, |ui| {
+                                                                            ui.label(&msg.content);
+                                                                        });
+                                                                });
+                                                                // Only add space if not the last message
+                                                                if i + 1 < len {
+                                                                    ui.add_space(4.0);
+                                                                }
+                                                            }
+                                                        });
+                                                    });
                                             });
-                                            
-                                            ui.separator();
-
-
-                                            // Chat frame with scroll area fills the rest
-                                            let scroll_height = ui.available_height() - 6.0;
-                                            
-                                            egui::Frame::default()
-                                                .stroke(egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color))
-                                                .inner_margin(egui::Margin::same(0))
-                                                .show(ui, |ui| {
-                                                    ui.set_width(ui.available_width() - 4.0); // subtract horizontal padding
-                                                    ui.set_height(scroll_height.max(40.0));
-                                                    egui::Frame::none()
-                                                        .inner_margin(egui::Margin::same(4))
-                                                        .show(ui, |ui| {
-                                                            egui::ScrollArea::vertical()
-                                                                .stick_to_bottom(true)
-                                                                .show(ui, |ui| {
-                                                                    ui.vertical(|ui| {
-                                                                        ui.set_width(ui.available_width());
-                                                                        let len = ui_state.inbox_messages.len();
-                                                                        for (i, (timestamp, msg)) in ui_state.inbox_messages.iter().enumerate() {
-                                                                            ui.horizontal(|ui| {
-                                                                                // Timestamp bubble
-                                                                                egui::Frame::new()
-                                                                                    .fill(ui.visuals().widgets.inactive.bg_fill)
-                                                                                    .stroke(egui::Stroke::new(0.5, ui.visuals().widgets.noninteractive.bg_stroke.color))
-                                                                                    .corner_radius(egui::CornerRadius::same(6))
-                                                                                    .inner_margin(egui::Margin::symmetric(6, 2))
-                                                                                    .show(ui, |ui| {
-                                                                                        ui.label(timestamp);
-                                                                                    });
-                                                                                // Message bubble
+                                    });
+                            });
+                        });
                                                                                 egui::Frame::new()
                                                                                     .fill(ui.visuals().extreme_bg_color)
                                                                                     .stroke(egui::Stroke::new(0.5, ui.visuals().widgets.noninteractive.bg_stroke.color))
