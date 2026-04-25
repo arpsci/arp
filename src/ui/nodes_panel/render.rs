@@ -127,9 +127,34 @@ impl AMSAgents {
                             }
                         };
 
-                        // List rooms (conversations)
+                        // List rooms (conversations) with stable UI ordering.
+                        // We intentionally preserve row positions across updates so activity writes
+                        // do not reshuffle rooms to the top.
                         let convs = store.list_conversations(50).unwrap_or_default();
-                        let mut rooms: Vec<Room> = convs.iter().map(|c| Room::new(c.id.clone(), format!("Room {}", &c.id[..8]))).collect();
+                        static ROOM_ORDER: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+                        let room_order = ROOM_ORDER.get_or_init(|| Mutex::new(Vec::new()));
+
+                        let mut rooms_by_id: std::collections::HashMap<String, Room> = convs
+                            .iter()
+                            .map(|c| {
+                                (
+                                    c.id.clone(),
+                                    Room::new(c.id.clone(), format!("Room {}", &c.id[..8])),
+                                )
+                            })
+                            .collect();
+
+                        let mut order = room_order.lock().unwrap();
+                        order.retain(|id| rooms_by_id.contains_key(id));
+                        for c in &convs {
+                            if !order.iter().any(|id| id == &c.id) {
+                                order.push(c.id.clone());
+                            }
+                        }
+                        let mut rooms: Vec<Room> = order
+                            .iter()
+                            .filter_map(|id| rooms_by_id.remove(id))
+                            .collect();
                         if rooms.is_empty() {
                             // Always have at least one room
                             let id = match store.create_conversation() {
@@ -143,11 +168,14 @@ impl AMSAgents {
                                 }
                             };
                             rooms.push(Room::new(id.clone(), format!("Room {}", &id[..8])));
+                            order.push(id);
                         }
 
                         // Static ChatExample for demonstration; in real app, store in ui_state
                         static CHAT: OnceLock<Mutex<ChatExample>> = OnceLock::new();
+                        static ACTIVE_ROOM_ID: OnceLock<Mutex<Option<String>>> = OnceLock::new();
                         let chat = CHAT.get_or_init(|| Mutex::new(ChatExample::new()));
+                        let active_room_id = ACTIVE_ROOM_ID.get_or_init(|| Mutex::new(None));
                         let mut chat = chat.lock().unwrap();
                         for item in chat.inbox.drain() {
                             let ts = ChatExample::display_time_for_message(&item);
@@ -158,10 +186,20 @@ impl AMSAgents {
                         if chat.selected_room.is_none() {
                             chat.selected_room = Some(rooms[0].id.clone());
                         }
-                        // When selected_room changes, load messages
-                        if let Some(selected_id) = &chat.selected_room {
-                            let (msgs, ts) = store.load_messages(selected_id).unwrap_or((vec![], vec![]));
-                            chat.hydrate(msgs, ts);
+
+                        // Initial hydration for the first selected room in this session.
+                        {
+                            let mut active = active_room_id.lock().unwrap();
+                            let selected_id = chat.selected_room.clone();
+                            if active.is_none()
+                                && let Some(selected_id) = selected_id
+                            {
+                                let (msgs, ts) = store
+                                    .load_messages(&selected_id)
+                                    .unwrap_or((vec![], vec![]));
+                                chat.hydrate(msgs, ts);
+                                *active = Some(selected_id);
+                            }
                         }
 
                         let split_height = ui.available_height() - 20.0; // Account for room selector and spacing
@@ -195,6 +233,43 @@ impl AMSAgents {
                                         });
                                 },
                             );
+
+                            // Persist current room view, then hydrate selected room, only when room changes.
+                            {
+                                let previous_room_id = {
+                                    let active = active_room_id.lock().unwrap();
+                                    active.clone()
+                                };
+                                let next_room_id = chat.selected_room.clone();
+                                if previous_room_id != next_room_id {
+                                    if let Some(prev_id) = previous_room_id {
+                                        let prev_still_exists = rooms.iter().any(|r| r.id == prev_id);
+                                        if prev_still_exists {
+                                            let _ = store.delete_messages_for_conversation(&prev_id);
+                                            for (idx, msg) in chat.messages.iter().enumerate() {
+                                                let ts = chat
+                                                    .message_timestamps
+                                                    .get(idx)
+                                                    .cloned()
+                                                    .unwrap_or_else(|| {
+                                                        ChatExample::display_time_for_message(msg)
+                                                    });
+                                                let _ = store.append_message(&prev_id, msg, &ts);
+                                            }
+                                        }
+                                    }
+
+                                    if let Some(next_id) = &next_room_id {
+                                        let (msgs, ts) = store
+                                            .load_messages(next_id)
+                                            .unwrap_or((vec![], vec![]));
+                                        chat.hydrate(msgs, ts);
+                                    }
+
+                                    let mut active = active_room_id.lock().unwrap();
+                                    *active = next_room_id;
+                                }
+                            }
 
                             
                             // Right: message bubbles area
