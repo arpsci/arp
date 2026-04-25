@@ -86,10 +86,11 @@ pub struct Store {
 impl Store {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let path = path.as_ref().to_path_buf();
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)?;
-            }
+        // Ensure metrics directory exists when opening the embedded sqlite file.
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)?;
         }
         let conn = Connection::open(&path)?;
         // Always run idempotent schema bootstrap so older DBs get missing columns.
@@ -109,6 +110,7 @@ impl Store {
     pub fn bootstrap_or_load(
         &self,
     ) -> Result<(String, Vec<ChatMessage>, Vec<String>, ConversationSettings), StoreError> {
+        // Resume most recent room for continuity; fall back to bootstrapping a new room.
         if let Some(id) = self.most_recent_conversation_id()? {
             let (msgs, ts) = self.load_messages(&id)?;
             let settings = self.load_conversation_settings(&id)?;
@@ -231,6 +233,7 @@ impl Store {
     }
 
     pub fn append_message(&self, conversation_id: &str, msg: &ChatMessage, display_ts: &str) -> Result<(), StoreError> {
+        // Keep optional correlation payload as JSON to preserve request/event linkage.
         let correlation_json = msg
             .correlation
             .as_ref()
@@ -340,6 +343,7 @@ impl Store {
 }
 
 fn touch_conversation_conn(conn: &Connection, id: &str) -> Result<(), StoreError> {
+    // Touch parent conversation so list sorting reflects message-level updates/deletions.
     let now = audit::now_rfc3339();
     conn.execute(
         "UPDATE conversations SET updated_at = ?1 WHERE id = ?2",

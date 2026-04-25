@@ -211,7 +211,7 @@ impl AMSAgents {
                                     .show(ui, |ui| {
                                         ui.set_min_height(row_height - 60.0); // Account for input row
                                         ui.set_height(row_height - 60.0); // Account for input row
-                                        ui.set_width((ui.available_width() - 4.0).max(0.0));
+                                        ui.set_width((ui.available_width() - 40.0).max(0.0)); // Account for additions on left
                                         egui::Frame::new()
                                             .inner_margin(egui::Margin::same(4))
                                             .show(ui, |ui| {

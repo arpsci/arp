@@ -1,3 +1,5 @@
+// UI state and rendering for the overview chat panel.
+// This type owns local chat state and forwards committed messages to persistence/hooks.
 #[derive(Debug, Clone)]
 pub struct Room {
     pub id: String,
@@ -36,6 +38,7 @@ impl<T> UiInbox<T> {
     }
 
     pub fn drain(&self) -> Vec<T> {
+        // Non-blocking drain keeps egui's frame loop responsive.
         let mut out = Vec::new();
         while let Ok(item) = self.rx.try_recv() {
             out.push(item);
@@ -79,7 +82,6 @@ pub struct ChatExample {
     pub message_handler: Option<MessageHandler>,
     pub message_commit_hook: Option<MessageCommitHook>,
     pub waiting_for_response: Arc<std::sync::Mutex<bool>>,
-    pub picked_file_path: Option<String>,
     pub main_input_enabled: bool,
 
     pub rooms: Vec<Room>,
@@ -157,10 +159,7 @@ impl ChatExample {
                 let mut delete_room_id: Option<String> = None;
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     for room in &self.rooms {
-                        let selected = self
-                            .selected_room
-                            .as_ref()
-                            .map_or(false, |id| id == &room.id);
+                        let selected = self.selected_room.as_ref() == Some(&room.id);
                         ui.horizontal(|ui| {
                             let row_height = ui.spacing().interact_size.y;
                             let x_width = row_height;
@@ -212,11 +211,11 @@ impl ChatExample {
     }
 
     pub fn display_time_for_message(msg: &ChatMessage) -> String {
-        if let Some(c) = &msg.correlation {
-            if let Ok(odt) = OffsetDateTime::parse(&c.timestamp_rfc3339, &Rfc3339) {
-                let t = odt.time();
-                return format!("{:02}:{:02}:{:02}", t.hour(), t.minute(), t.second());
-            }
+        if let Some(c) = &msg.correlation
+            && let Ok(odt) = OffsetDateTime::parse(&c.timestamp_rfc3339, &Rfc3339)
+        {
+            let t = odt.time();
+            return format!("{:02}:{:02}:{:02}", t.hour(), t.minute(), t.second());
         }
         Self::current_timestamp_string()
     }
@@ -245,7 +244,6 @@ impl ChatExample {
             message_handler: None,
             message_commit_hook: None,
             waiting_for_response: Arc::new(std::sync::Mutex::new(false)),
-            picked_file_path: None,
             main_input_enabled: true,
             rooms: Vec::new(),
             sidebar_open: true,
@@ -304,6 +302,7 @@ impl ChatExample {
             .collect()
     }
 
+    // Retained for future room-level reset actions from the sidebar.
     #[allow(dead_code)]
     pub fn clear_messages(&mut self) {
         self.messages.clear();
@@ -332,7 +331,10 @@ impl ChatExample {
             }
         });
 
-        self.sidebar_ui(ui);
+        // Sidebar visibility is explicitly user-controlled by the toggle button.
+        if self.sidebar_open {
+            self.sidebar_ui(ui);
+        }
 
         egui::CentralPanel::default().show_inside(ui, |ui| {
             ui.vertical(|ui| {
@@ -394,10 +396,10 @@ impl ChatExample {
                             self.message_timestamps.push(ts.clone());
                             self.commit_message(&persisted, &ts);
 
-                            if let Some(room_id) = &self.selected_room {
-                                if let Ok(store) = super::store::Store::open("metrics/overview_chat.sqlite") {
-                                    let _ = store.append_message(room_id, &persisted, &ts);
-                                }
+                            if let Some(room_id) = &self.selected_room
+                                && let Ok(store) = super::store::Store::open("metrics/overview_chat.sqlite")
+                            {
+                                let _ = store.append_message(room_id, &persisted, &ts);
                             }
 
                             if let Some(handler) = &self.message_handler {
@@ -417,17 +419,6 @@ impl ChatExample {
                         }
                     });
 
-                    ui.horizontal(|ui| {
-                        if ui
-                            .add_sized(Vec2::new(28.0, 26.0), egui::Button::new("+"))
-                            .clicked()
-                        {
-                            self.picked_file_path = Some("Attachment selected".to_string());
-                        }
-                        if let Some(file_path) = &self.picked_file_path {
-                            ui.label(egui::RichText::new(format!("File: {file_path}")).small().weak());
-                        }
-                    });
                 });
             });
         });
