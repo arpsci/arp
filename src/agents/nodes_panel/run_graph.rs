@@ -7,7 +7,7 @@ use crate::run::manifest::runs_root;
 use super::manifest_ops::sync_evaluator_researcher_activity;
 use super::model::NodePayload;
 use super::play_plan::{
-    PlayConversationPairJson, PlayWorkerInPlayJson, build_conversation_sidecar_from_agents,
+    PlayConversationGroupJson, PlayWorkerInPlayJson, build_conversation_sidecar_from_agents,
     collect_run_play_plan_from_agents,
 };
 
@@ -17,6 +17,14 @@ impl AMSAgents {
             .ok()
             .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
             .unwrap_or(false)
+    }
+
+    fn conversation_group_size() -> usize {
+        std::env::var("AMS_CONVERSATION_GROUP_SIZE")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(2)
+            .max(1)
     }
 
     pub(crate) fn stop_graph(&mut self) {
@@ -124,6 +132,7 @@ impl AMSAgents {
             topic_source: String,
             manager_name: String,
             partner_worker: Option<usize>,
+            global_id: String,
         }
 
         let mut eligible: Vec<EligibleWorker> = self
@@ -157,6 +166,7 @@ impl AMSAgents {
                             topic_source: w.conversation_topic_source.clone(),
                             manager_name,
                             partner_worker: w.partner_worker,
+                            global_id: w.global_id.clone(),
                         });
                     }
                 }
@@ -184,170 +194,103 @@ impl AMSAgents {
             return status_message;
         }
 
-        let n_conversation_loops = (eligible.len() + 1) / 2;
+        let group_size = Self::conversation_group_size();
+        let mut planned_groups: Vec<Vec<usize>> = Vec::new();
+        if group_size == 2 {
+            // Preserve explicit partner behavior when running classic pairs.
+            let mut used_workers: std::collections::HashSet<usize> = std::collections::HashSet::new();
+            for a in &eligible {
+                if used_workers.contains(&a.id) {
+                    continue;
+                }
+                if let Some(partner_id) = a.partner_worker
+                    && partner_id != a.id
+                    && !used_workers.contains(&partner_id)
+                    && eligible_by_id.contains_key(&partner_id)
+                {
+                    used_workers.insert(a.id);
+                    used_workers.insert(partner_id);
+                    planned_groups.push(vec![a.id, partner_id]);
+                }
+            }
+            let remaining: Vec<usize> = eligible
+                .iter()
+                .filter(|w| !used_workers.contains(&w.id))
+                .map(|w| w.id)
+                .collect();
+            let mut i = 0;
+            while i < remaining.len() {
+                if i + 1 < remaining.len() {
+                    planned_groups.push(vec![remaining[i], remaining[i + 1]]);
+                    i += 2;
+                } else {
+                    planned_groups.push(vec![remaining[i]]);
+                    i += 1;
+                }
+            }
+        } else {
+            // For 3+ participants, group workers by sorted row order.
+            let ordered: Vec<usize> = eligible.iter().map(|w| w.id).collect();
+            let mut i = 0;
+            while i < ordered.len() {
+                let end = (i + group_size).min(ordered.len());
+                planned_groups.push(ordered[i..end].to_vec());
+                i = end;
+            }
+        }
+
         self.conversation_run_generation
             .fetch_add(1, Ordering::SeqCst);
         let run_generation = self.conversation_run_generation.load(Ordering::SeqCst);
-        let loops_remaining = Arc::new(AtomicUsize::new(n_conversation_loops));
+        let loops_remaining = Arc::new(AtomicUsize::new(planned_groups.len()));
         let gen_counter = self.conversation_run_generation.clone();
         let graph_running_flag = self.conversation_graph_running.clone();
 
         let mut conversations_plan = Vec::new();
-        let mut used_workers: std::collections::HashSet<usize> = std::collections::HashSet::new();
-        let mut planned_pairs: Vec<(usize, usize)> = Vec::new();
+        for group in planned_groups {
+            let participants: Vec<crate::agents::agent_conversation_loop::ConversationParticipant> =
+                group
+                    .iter()
+                    .filter_map(|worker_id| eligible_by_id.get(worker_id).map(|idx| &eligible[*idx]))
+                    .map(|w| crate::agents::agent_conversation_loop::ConversationParticipant {
+                        id: w.id,
+                        name: w.name.clone(),
+                        instruction: w.instruction.clone(),
+                        topic: w.topic.clone(),
+                        topic_source: w.topic_source.clone(),
+                        manager_name: w.manager_name.clone(),
+                        global_id: w.global_id.clone(),
+                    })
+                    .collect();
 
-        // Explicit pairs first, then fallback to sorted row order for unpaired workers.
-        for a in &eligible {
-            if used_workers.contains(&a.id) {
+            if participants.is_empty() {
                 continue;
             }
-            if let Some(partner_id) = a.partner_worker
-                && partner_id != a.id
-                && !used_workers.contains(&partner_id)
-                && eligible_by_id.contains_key(&partner_id)
-            {
-                used_workers.insert(a.id);
-                used_workers.insert(partner_id);
-                planned_pairs.push((a.id, partner_id));
-            }
-        }
-        let remaining: Vec<usize> = eligible
-            .iter()
-            .filter(|w| !used_workers.contains(&w.id))
-            .map(|w| w.id)
-            .collect();
-        let mut i = 0;
-        while i < remaining.len() {
-            if i + 1 < remaining.len() {
-                planned_pairs.push((remaining[i], remaining[i + 1]));
-                i += 2;
-            } else {
-                planned_pairs.push((remaining[i], remaining[i]));
-                i += 1;
-            }
-        }
 
-        for (a_id, b_id) in planned_pairs {
-            let a = &eligible[*eligible_by_id.get(&a_id).unwrap()];
-            let b = &eligible[*eligible_by_id.get(&b_id).unwrap()];
-            if a.id != b.id {
-                let gid_a = self
-                    .nodes_panel
-                    .agents
+            let loop_key = participants[0].id;
+            conversations_plan.push(PlayConversationGroupJson {
+                loop_key_node_id: loop_key,
+                workers: participants
                     .iter()
-                    .find(|r| r.id == a.id)
-                    .and_then(|r| {
-                        if let NodePayload::Worker(w) = &r.data.payload {
-                            Some(w.global_id.clone())
-                        } else {
-                            None
-                        }
+                    .map(|p| PlayWorkerInPlayJson {
+                        node_id: p.id,
+                        name: p.name.clone(),
+                        global_id: p.global_id.clone(),
+                        conversation_topic: p.topic.clone(),
+                        conversation_topic_source: p.topic_source.clone(),
                     })
-                    .unwrap_or_default();
-                let gid_b = self
-                    .nodes_panel
-                    .agents
-                    .iter()
-                    .find(|r| r.id == b.id)
-                    .and_then(|r| {
-                        if let NodePayload::Worker(w) = &r.data.payload {
-                            Some(w.global_id.clone())
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or_default();
-                conversations_plan.push(PlayConversationPairJson {
-                    loop_key_node_id: a.id,
-                    agent_a: PlayWorkerInPlayJson {
-                        node_id: a.id,
-                        name: a.name.clone(),
-                        global_id: gid_a,
-                        conversation_topic: a.topic.clone(),
-                        conversation_topic_source: a.topic_source.clone(),
-                    },
-                    agent_b: PlayWorkerInPlayJson {
-                        node_id: b.id,
-                        name: b.name.clone(),
-                        global_id: gid_b,
-                        conversation_topic: b.topic.clone(),
-                        conversation_topic_source: b.topic_source.clone(),
-                    },
-                    solo: false,
-                });
-                self.start_conversation_from_node_worker_resolved(
-                    sidecars.clone(),
-                    run_generation,
-                    gen_counter.clone(),
-                    loops_remaining.clone(),
-                    graph_running_flag.clone(),
-                    a.id,
-                    a.id,
-                    a.name.clone(),
-                    a.instruction.clone(),
-                    a.topic.clone(),
-                    a.topic_source.clone(),
-                    a.manager_name.clone(),
-                    b.id,
-                    b.name.clone(),
-                    b.instruction.clone(),
-                    b.topic.clone(),
-                    b.topic_source.clone(),
-                    b.manager_name.clone(),
-                );
-            } else {
-                let gid = self
-                    .nodes_panel
-                    .agents
-                    .iter()
-                    .find(|r| r.id == a.id)
-                    .and_then(|r| {
-                        if let NodePayload::Worker(w) = &r.data.payload {
-                            Some(w.global_id.clone())
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or_default();
-                conversations_plan.push(PlayConversationPairJson {
-                    loop_key_node_id: a.id,
-                    agent_a: PlayWorkerInPlayJson {
-                        node_id: a.id,
-                        name: a.name.clone(),
-                        global_id: gid.clone(),
-                        conversation_topic: a.topic.clone(),
-                        conversation_topic_source: a.topic_source.clone(),
-                    },
-                    agent_b: PlayWorkerInPlayJson {
-                        node_id: a.id,
-                        name: a.name.clone(),
-                        global_id: gid,
-                        conversation_topic: a.topic.clone(),
-                        conversation_topic_source: a.topic_source.clone(),
-                    },
-                    solo: true,
-                });
-                self.start_conversation_from_node_worker_resolved(
-                    sidecars.clone(),
-                    run_generation,
-                    gen_counter.clone(),
-                    loops_remaining.clone(),
-                    graph_running_flag.clone(),
-                    a.id,
-                    a.id,
-                    a.name.clone(),
-                    a.instruction.clone(),
-                    a.topic.clone(),
-                    a.topic_source.clone(),
-                    a.manager_name.clone(),
-                    a.id,
-                    a.name.clone(),
-                    a.instruction.clone(),
-                    a.topic.clone(),
-                    a.topic_source.clone(),
-                    a.manager_name.clone(),
-                );
-            }
+                    .collect(),
+            });
+
+            self.start_conversation_from_node_worker_resolved(
+                sidecars.clone(),
+                run_generation,
+                gen_counter.clone(),
+                loops_remaining.clone(),
+                graph_running_flag.clone(),
+                loop_key,
+                participants,
+            );
         }
 
         if Self::should_log_play_plan() {
@@ -373,20 +316,8 @@ impl AMSAgents {
         loops_remaining_in_run: Arc<AtomicUsize>,
         conversation_graph_running_flag: Arc<AtomicBool>,
         loop_key_node_id: usize,
-        agent_a_node_id: usize,
-        agent_a_name: String,
-        agent_a_instruction: String,
-        agent_a_topic: String,
-        agent_a_topic_source: String,
-        agent_a_manager_name: String,
-        agent_b_id: usize,
-        agent_b_name: String,
-        agent_b_instruction: String,
-        agent_b_topic: String,
-        agent_b_topic_source: String,
-        agent_b_manager_name: String,
+        participants: Vec<crate::agents::agent_conversation_loop::ConversationParticipant>,
     ) {
-        let agent_a_id = agent_a_node_id;
         let active_flag = Arc::new(Mutex::new(true));
         let flag_clone = active_flag.clone();
         let endpoint = self.http_endpoint.clone();
@@ -405,33 +336,6 @@ impl AMSAgents {
         let ollama_epoch = self.ollama_run_epoch.clone();
         let ollama_caught = self.ollama_run_epoch.load(Ordering::SeqCst);
         let ollama_stop_epoch = Some((ollama_epoch, ollama_caught));
-
-        let agent_a_global_id = self
-            .nodes_panel
-            .agents
-            .iter()
-            .find(|r| r.id == agent_a_id)
-            .and_then(|r| {
-                if let NodePayload::Worker(w) = &r.data.payload {
-                    Some(w.global_id.clone())
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_default();
-        let agent_b_global_id = self
-            .nodes_panel
-            .agents
-            .iter()
-            .find(|r| r.id == agent_b_id)
-            .and_then(|r| {
-                if let NodePayload::Worker(w) = &r.data.payload {
-                    Some(w.global_id.clone())
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_default();
         let ledger = self.event_ledger.clone();
         let app_state = self.app_state.clone();
         let chat_tx = self.chat_turn_tx.clone();
@@ -442,20 +346,7 @@ impl AMSAgents {
                 message_event_source_id,
                 ollama_stop_epoch,
                 sidecars,
-                agent_a_id,
-                agent_a_name,
-                agent_a_instruction,
-                agent_a_topic,
-                agent_a_topic_source,
-                agent_a_manager_name,
-                agent_a_global_id,
-                agent_b_id,
-                agent_b_name,
-                agent_b_instruction,
-                agent_b_topic,
-                agent_b_topic_source,
-                agent_b_manager_name,
-                agent_b_global_id,
+                participants,
                 ollama_host,
                 endpoint,
                 flag_clone,

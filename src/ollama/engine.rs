@@ -1,7 +1,9 @@
 use std::collections::HashMap;
+use std::time::Duration;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{Result, anyhow};
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 
 use super::{OLLAMA_STOPPED_MSG, OllamaStopEpoch, TokenUsage, client};
@@ -30,6 +32,7 @@ pub(crate) struct InferenceResponse {
     pub model: String,
     pub text: String,
     pub usage: Option<TokenUsage>,
+    pub ttft: Option<Duration>,
 }
 
 #[derive(Serialize)]
@@ -62,6 +65,7 @@ struct ChatResponse {
     response: Option<String>,
     prompt_eval_count: Option<u64>,
     eval_count: Option<u64>,
+    done: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -117,7 +121,7 @@ impl InferenceEngine {
 
         let payload = ChatRequest {
             model: &model,
-            stream: false,
+            stream: true,
             messages: vec![
                 ChatMessage {
                     role: "system",
@@ -145,15 +149,66 @@ impl InferenceEngine {
             return Err(anyhow!(OLLAMA_STOPPED_MSG));
         }
 
-        let parsed: ChatResponse = response.json().await?;
-        let text = if let Some(message) = parsed.message {
-            message.content
-        } else if let Some(text) = parsed.response {
-            text
-        } else {
+        let stream_started = std::time::Instant::now();
+        let mut ttft: Option<Duration> = None;
+        let mut model_seen = parsed_model_default(&model);
+        let mut prompt_eval_count: Option<u64> = None;
+        let mut eval_count: Option<u64> = None;
+        let mut text = String::new();
+        let mut pending = String::new();
+
+        let mut stream = response.bytes_stream();
+        while let Some(chunk_result) = stream.next().await {
+            if let Some((epoch, caught)) = &req.stop_epoch
+                && epoch.load(std::sync::atomic::Ordering::SeqCst) != *caught
+            {
+                return Err(anyhow!(OLLAMA_STOPPED_MSG));
+            }
+
+            let chunk = chunk_result?;
+            if ttft.is_none() && !chunk.is_empty() {
+                ttft = Some(stream_started.elapsed());
+            }
+            pending.push_str(&String::from_utf8_lossy(&chunk));
+
+            while let Some(nl) = pending.find('\n') {
+                let line = pending[..nl].trim();
+                if !line.is_empty()
+                    && let Ok(parsed) = serde_json::from_str::<ChatResponse>(line)
+                {
+                    apply_chat_response_fragment(
+                        &parsed,
+                        &mut model_seen,
+                        &mut text,
+                        &mut prompt_eval_count,
+                        &mut eval_count,
+                    );
+                    if parsed.done.unwrap_or(false) {
+                        // Continue draining stream in case server sends trailing lines.
+                    }
+                }
+                pending.drain(..=nl);
+            }
+        }
+
+        let tail = pending.trim();
+        if !tail.is_empty()
+            && let Ok(parsed) = serde_json::from_str::<ChatResponse>(tail)
+        {
+            apply_chat_response_fragment(
+                &parsed,
+                &mut model_seen,
+                &mut text,
+                &mut prompt_eval_count,
+                &mut eval_count,
+            );
+        }
+
+        if text.trim().is_empty() {
             return Err(anyhow!("ollama returned an empty response"));
-        };
-        let usage = match (parsed.prompt_eval_count, parsed.eval_count) {
+        }
+
+        let usage = match (prompt_eval_count, eval_count) {
             (Some(prompt), Some(candidates)) => Some(TokenUsage {
                 prompt_token_count: prompt,
                 candidates_token_count: candidates,
@@ -163,9 +218,37 @@ impl InferenceEngine {
         };
 
         Ok(InferenceResponse {
-            model: parsed.model.unwrap_or(model),
+            model: model_seen,
             text,
             usage,
+            ttft,
         })
+    }
+}
+
+fn parsed_model_default(default_model: &str) -> String {
+    default_model.to_string()
+}
+
+fn apply_chat_response_fragment(
+    parsed: &ChatResponse,
+    model_seen: &mut String,
+    text: &mut String,
+    prompt_eval_count: &mut Option<u64>,
+    eval_count: &mut Option<u64>,
+) {
+    if let Some(model) = &parsed.model {
+        *model_seen = model.clone();
+    }
+    if let Some(message) = &parsed.message {
+        text.push_str(&message.content);
+    } else if let Some(resp) = &parsed.response {
+        text.push_str(resp);
+    }
+    if parsed.prompt_eval_count.is_some() {
+        *prompt_eval_count = parsed.prompt_eval_count;
+    }
+    if parsed.eval_count.is_some() {
+        *eval_count = parsed.eval_count;
     }
 }

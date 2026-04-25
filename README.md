@@ -40,17 +40,15 @@ Being done
 
 ### Dependencies
 
-- eframe
-- egui
+- eframe / egui
 - catppuccin-egui
 - egui-phosphor
 - tokio
-- adk-agent
-- adk-model
-- adk-runner
 - reqwest
 - rocket
-- serde
+- serde / serde_json
+- rusqlite
+- argon2 + hkdf + chacha20poly1305
 
 
 ### Reproducibility

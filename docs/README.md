@@ -1,6 +1,6 @@
 # ARPSCI Dashboard Docs
 
-This folder contains project documentation for the ARPSCI Dashboard.
+This folder contains project documentation for the ARPSCI project.
 
 ## What Is Here
 

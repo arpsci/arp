@@ -57,6 +57,9 @@ impl AMSAgents {
             {
                 self.selected_ollama_model = first.clone();
             }
+            if ui_state.ollama.model_selection_draft.trim().is_empty() {
+                ui_state.ollama.model_selection_draft = self.selected_ollama_model.clone();
+            }
 
             ui.horizontal(|ui| {
                 ui.label("API host / URL:");
@@ -66,21 +69,40 @@ impl AMSAgents {
             ui.add_space(5.0);
             ui.horizontal(|ui| {
                 ui.label("Global Ollama Model:");
+                let mut draft = ui_state.ollama.model_selection_draft.clone();
                 egui::ComboBox::from_id_salt("ollama_model_selector_global")
-                    .selected_text(if self.selected_ollama_model.is_empty() {
+                    .selected_text(if draft.is_empty() {
                         "Select model".to_string()
                     } else {
-                        self.selected_ollama_model.clone()
+                        draft.clone()
                     })
                     .show_ui(ui, |ui| {
                         for model in &models {
-                            ui.selectable_value(
-                                &mut self.selected_ollama_model,
-                                model.clone(),
-                                model,
-                            );
+                            ui.selectable_value(&mut draft, model.clone(), model);
                         }
                     });
+
+                // Combo selection updates the app-level global model immediately.
+                if draft != ui_state.ollama.model_selection_draft {
+                    ui_state.ollama.model_selection_draft = draft.clone();
+                    self.selected_ollama_model = draft;
+                }
+
+                if ui.button("Set").clicked() {
+                    let selected = ui_state.ollama.model_selection_draft.trim().to_string();
+                    self.selected_ollama_model = selected.clone();
+                    // Update process env so downstream code reading OLLAMA_MODEL sees the same global model.
+                    unsafe {
+                        std::env::set_var("OLLAMA_MODEL", selected.clone());
+                    }
+                    if selected.is_empty() {
+                        ui_state.ollama.model_set_status =
+                            "Global model cleared (using fallback).".to_string();
+                    } else {
+                        ui_state.ollama.model_set_status =
+                            format!("Global model set: {}", selected);
+                    }
+                }
 
                 let loading = *ui_state.ollama.models_loading.lock().unwrap();
                 if ui
@@ -109,6 +131,9 @@ impl AMSAgents {
                     .small()
                     .weak(),
             );
+            if !ui_state.ollama.model_set_status.is_empty() {
+                ui.label(egui::RichText::new(&ui_state.ollama.model_set_status).small().weak());
+            }
 
             ui.add_space(10.0);
             ui.label(egui::RichText::new("Ollama Test").strong().size(16.0));

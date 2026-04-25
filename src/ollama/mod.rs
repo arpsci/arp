@@ -159,6 +159,11 @@ pub async fn send_to_ollama_with_result(
     };
 
     let t_end_wall = SystemTime::now();
+    let first_token_at = infer
+        .ttft
+        .and_then(|d| t_start_wall.checked_add(d))
+        .map(format_rfc3339);
+    let ttft_ms = infer.ttft.map(|d| d.as_millis());
     let output_chars = infer.text.chars().count();
     metrics_sink.record_inference(InferenceTimingEvent {
         event_type: "inference_timing".to_string(),
@@ -171,10 +176,10 @@ pub async fn send_to_ollama_with_result(
         success: true,
         error: None,
         t_start: format_rfc3339(t_start_wall),
-        t_first_token: None,
+        t_first_token: first_token_at,
         t_end: format_rfc3339(t_end_wall),
         duration_ms: t_start.elapsed().as_millis(),
-        ttft_ms: None,
+        ttft_ms,
         input_chars: input.chars().count(),
         output_chars,
         prompt_token_count: infer.usage.as_ref().map(|u| u.prompt_token_count),

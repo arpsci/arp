@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 
 use eframe::egui;
@@ -105,6 +106,15 @@ impl AMSAgents {
                     use std::sync::{Mutex, OnceLock};
                     static CHAT: OnceLock<Mutex<ChatExample>> = OnceLock::new();
                     static ACTIVE_ROOM_ID: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+
+                    // Keep polling UI frames while conversation loops are active so chat turn
+                    // events appear incrementally rather than in bursts on the next user input.
+                    if self
+                        .conversation_graph_running
+                        .load(Ordering::Relaxed)
+                    {
+                        ui.ctx().request_repaint_after(Duration::from_millis(33));
+                    }
 
                     if self.nodes_panel.active_tab == PanelTab::Overview {
                         use crate::ui::overview_chat::chat::Room;

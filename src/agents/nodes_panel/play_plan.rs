@@ -3,19 +3,16 @@ use super::state::AgentRecord;
 
 #[derive(serde::Serialize)]
 pub(super) struct RunPlayPlanJson {
-    pub(crate) conversations: Vec<PlayConversationPairJson>,
+    pub(crate) conversations: Vec<PlayConversationGroupJson>,
     pub(crate) managers: Vec<PlayManagerJson>,
     pub(crate) evaluators: Vec<PlayEvaluatorInPlayJson>,
     pub(crate) researchers: Vec<PlayResearcherInPlayJson>,
 }
 
 #[derive(serde::Serialize)]
-pub(super) struct PlayConversationPairJson {
+pub(super) struct PlayConversationGroupJson {
     pub(crate) loop_key_node_id: usize,
-    pub(crate) agent_a: PlayWorkerInPlayJson,
-    pub(crate) agent_b: PlayWorkerInPlayJson,
-    /// True when only one eligible worker exists (paired with itself for the loop).
-    pub(crate) solo: bool,
+    pub(crate) workers: Vec<PlayWorkerInPlayJson>,
 }
 
 #[derive(serde::Serialize)]
@@ -95,7 +92,7 @@ pub(super) fn build_conversation_sidecar_from_agents(
 
 pub(super) fn collect_run_play_plan_from_agents(
     agents: &[AgentRecord],
-    conversations: Vec<PlayConversationPairJson>,
+    conversations: Vec<PlayConversationGroupJson>,
 ) -> RunPlayPlanJson {
     let mut managers = Vec::new();
     let mut evaluators = Vec::new();

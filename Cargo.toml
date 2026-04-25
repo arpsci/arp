@@ -12,14 +12,9 @@ egui = "0.33"
 catppuccin-egui = { version = "5.7.0", default-features = false, features = ["egui33"] }
 egui-phosphor = "0.11.0"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
-adk-agent = "0.3.2"
-adk-model = { version = "0.3.2", features = ["ollama"] }
-adk-runner = "0.3.2"
-adk-session = "0.3.2"
-adk-core = "0.3.2"
 anyhow = "1.0"
 futures-util = "0.3"
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
 rocket = { version = "0.5.1", features = ["json"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -29,7 +24,6 @@ uuid = { version = "1", features = ["v4"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 rand = "0.9"
 sha2 = "0.10"
-zip = { version = "2", default-features = false, features = ["deflate"] }
 argon2 = "0.5"
 secrecy = "0.10"
 rpassword = "7"

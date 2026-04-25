@@ -9,7 +9,7 @@ use crate::run::manifest::now_rfc3339_utc;
 use crate::run::event_ledger::EventLedger;
 use crate::run::manifest::RunContext;
 use crate::ollama::OllamaStopEpoch;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -22,20 +22,24 @@ struct ConversationPerfConfig {
 
 impl ConversationPerfConfig {
     fn load() -> Self {
-        let fast_mode = env_flag("AMS_FAST_MODE", false);
         Self {
-            quiet_logs: env_flag("AMS_QUIET_LOGS", fast_mode || true),
-            async_http: env_flag("AMS_ASYNC_HTTP", true),
-            compact_ledger: env_flag("AMS_COMPACT_LEDGER", fast_mode),
+            // Keep timings stable and minimize overhead: fixed fast profile.
+            quiet_logs: true,
+            async_http: true,
+            compact_ledger: true,
         }
     }
 }
 
-fn env_flag(name: &str, default: bool) -> bool {
-    std::env::var(name)
-        .ok()
-        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-        .unwrap_or(default)
+#[derive(Clone)]
+pub struct ConversationParticipant {
+    pub id: usize,
+    pub name: String,
+    pub instruction: String,
+    pub topic: String,
+    pub topic_source: String,
+    pub manager_name: String,
+    pub global_id: String,
 }
 
 // ─── Conversation loop entry point ────────────────────────────────────────
@@ -46,20 +50,7 @@ pub async fn start_conversation_loop(
     message_event_source_id: usize,
     ollama_stop_epoch: Option<OllamaStopEpoch>,
     sidecars: Arc<ConversationSidecarConfig>,
-    agent_a_id: usize,
-    agent_a_name: String,
-    agent_a_instruction: String,
-    agent_a_topic: String,
-    agent_a_topic_source: String,
-    agent_a_manager_name: String,
-    agent_a_global_id: String,
-    agent_b_id: usize,
-    agent_b_name: String,
-    agent_b_instruction: String,
-    agent_b_topic: String,
-    agent_b_topic_source: String,
-    agent_b_manager_name: String,
-    agent_b_global_id: String,
+    participants: Vec<ConversationParticipant>,
     ollama_host: String,
     endpoint: String,
     active_flag: Arc<Mutex<bool>>,
@@ -77,32 +68,51 @@ pub async fn start_conversation_loop(
     chat_turn_tx: Option<std::sync::mpsc::Sender<crate::agents::AgentChatEvent>>,
     chat_room_id: Option<String>,
 ) {
+    if participants.is_empty() {
+        return;
+    }
+
     let perf = ConversationPerfConfig::load();
     let mut turn = 0;
-    let mut is_agent_a_turn = true;
-    let session_id = format!("pair-{message_event_source_id}-{agent_a_id}-{agent_b_id}");
+    let mut current_speaker_idx = 0usize;
+    let participant_ids = participants
+        .iter()
+        .map(|p| p.id.to_string())
+        .collect::<Vec<_>>()
+        .join("-");
+    let session_id = format!("group-{message_event_source_id}-{participant_ids}");
     let mut session = DialogueSessionState::new(session_id.clone(), history_size.max(1));
     let mut turn_tracker = TurnTracker::default();
     let (background_research_tx, mut background_research_rx) =
         tokio::sync::mpsc::unbounded_channel::<(usize, String)>();
     let mut background_research_cache: HashMap<usize, String> = HashMap::new();
-    let conversation_manager_name = if agent_a_manager_name == agent_b_manager_name {
-        agent_a_manager_name.clone()
-    } else {
-        format!("{} + {}", agent_a_manager_name, agent_b_manager_name)
-    };
-    let topics_summary = format!(
-        "Topics => {}: \"{}\" | {}: \"{}\"",
-        agent_a_name, agent_a_topic, agent_b_name, agent_b_topic,
-    );
-    let topics_readable = format!(
-        "Topics:\n- {}: {}\n- {}: {}",
-        agent_a_name, agent_a_topic, agent_b_name, agent_b_topic,
-    );
+    let mut manager_names: Vec<String> = participants
+        .iter()
+        .map(|p| p.manager_name.clone())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    manager_names.sort();
+    let conversation_manager_name = manager_names.join(" + ");
+    let topics_summary = participants
+        .iter()
+        .map(|p| format!("{}: \"{}\"", p.name, p.topic))
+        .collect::<Vec<_>>()
+        .join(" | ");
+    let topics_readable = participants
+        .iter()
+        .map(|p| format!("- {}: {}", p.name, p.topic))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let roster = participants
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect::<Vec<_>>()
+        .join(" -> ");
 
     let start_message = format!(
-        "Conversation started\nSession: {}\nManager: {}\nPair: {} ↔ {}\n{}",
-        session_id, conversation_manager_name, agent_a_name, agent_b_name, topics_readable
+        "Conversation started\nSession: {}\nManager: {}\nOrder: {}\nTopics:\n{}",
+        session_id, conversation_manager_name, roster, topics_readable
     );
     if !perf.quiet_logs {
         println!("\n{}", start_message);
@@ -186,48 +196,22 @@ pub async fn start_conversation_loop(
             }
         }
 
-        let (
-            sender_id,
-            sender_name,
-            sender_instruction,
-            sender_topic,
-            sender_topic_source,
-            receiver_id,
-            receiver_name,
-            receiver_topic,
-        ) = if is_agent_a_turn {
-            (
-                agent_a_id,
-                agent_a_name.clone(),
-                agent_a_instruction.clone(),
-                agent_a_topic.clone(),
-                agent_a_topic_source.clone(),
-                agent_b_id,
-                agent_b_name.clone(),
-                agent_b_topic.clone(),
-            )
-        } else {
-            (
-                agent_b_id,
-                agent_b_name.clone(),
-                agent_b_instruction.clone(),
-                agent_b_topic.clone(),
-                agent_b_topic_source.clone(),
-                agent_a_id,
-                agent_a_name.clone(),
-                agent_a_topic.clone(),
-            )
-        };
+        let sender = &participants[current_speaker_idx];
+        let receiver = &participants[(current_speaker_idx + 1) % participants.len()];
+        let sender_id = sender.id;
+        let sender_name = sender.name.clone();
+        let sender_instruction = sender.instruction.clone();
+        let sender_topic = sender.topic.clone();
+        let sender_topic_source = sender.topic_source.clone();
+        let receiver_id = receiver.id;
+        let receiver_name = receiver.name.clone();
+        let receiver_topic = receiver.topic.clone();
         let effective_topic = if sender_topic_source == "Follow Partner" {
             receiver_topic.clone()
         } else {
             sender_topic.clone()
         };
-        let manager_name = if is_agent_a_turn {
-            agent_a_manager_name.clone()
-        } else {
-            agent_b_manager_name.clone()
-        };
+        let manager_name = sender.manager_name.clone();
 
         // Pre-turn: ground on the tied worker's last line when it exists; else partner line (first turn).
         let research_grounding = session
@@ -378,11 +362,7 @@ pub async fn start_conversation_loop(
                 assembled_prompt.system_instruction, assembled_prompt.user_prompt
             )
         };
-        let sender_gid = if sender_id == agent_a_id {
-            agent_a_global_id.clone()
-        } else {
-            agent_b_global_id.clone()
-        };
+        let sender_gid = sender.global_id.clone();
         match crate::ollama::send_to_ollama_with_result(
             ollama_host.as_str(),
             &assembled_prompt.system_instruction,
@@ -527,7 +507,7 @@ pub async fn start_conversation_loop(
 
                 turn_tracker.mark_turn_completed();
 
-                is_agent_a_turn = !is_agent_a_turn;
+                current_speaker_idx = (current_speaker_idx + 1) % participants.len();
                 turn += 1;
             }
             Err(e) => {
@@ -558,8 +538,13 @@ pub async fn start_conversation_loop(
     }
 
     let end_message = format!(
-        "Conversation Ended: {} ↔ {}\nTotal turns: {}",
-        agent_a_name, agent_b_name, turn
+        "Conversation Ended: {}\nTotal turns: {}",
+        participants
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect::<Vec<_>>()
+            .join(" -> "),
+        turn
     );
     if !perf.quiet_logs {
         println!("\n{}", end_message);
