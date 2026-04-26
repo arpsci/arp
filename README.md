@@ -31,6 +31,16 @@ AMS_WEB_ENABLED=true cargo run
 # Distribution: build the application ('target/release/')
 cargo build --release
 
-cargo run --bin timings_report -- metrics/timings.jsonl
-
 ```
+
+### Metrics
+
+[README.md](./metrics/README.md)
+
+### Docs
+
+[README.md](./docs/README.md)
+
+### Tests
+
+[README.md](./tests/README.md)

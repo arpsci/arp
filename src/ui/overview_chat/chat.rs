@@ -122,7 +122,10 @@ impl ChatExample {
             Err(_) => return,
         };
 
-        let rooms_section_height = ui.available_height().min(200.0).max(0.0);
+        let rooms_section_height = ui.available_height();
+        let rooms_list_height = 100.0;
+
+        
         ui.allocate_ui_with_layout(
             egui::vec2(ui.available_width(), rooms_section_height),
             egui::Layout::top_down(egui::Align::Min),
@@ -148,16 +151,35 @@ impl ChatExample {
                 ui.separator();
                 ui.label("Room Settings");
 
-                if ui.button("New room").clicked() {
-                    let name = format!("Room {}", self.rooms.len() + 1);
-                    self.add_room(name, &mut store);
-                }
+                ui.horizontal(|ui| {
+                    if ui.button("New room").clicked() {
+                        let name = format!("Room {}", self.rooms.len() + 1);
+                        self.add_room(name, &mut store);
+                    }
+                    if ui
+                        .add_enabled(
+                            self.selected_room.is_some(),
+                            egui::Button::new("Clear Room"),
+                        )
+                        .on_hover_text("Clear messages in the current room")
+                        .clicked()
+                    {
+                        if let Some(room_id) = self.selected_room.as_ref() {
+                            let _ = store.delete_messages_for_conversation(room_id);
+                            self.messages.clear();
+                            self.message_timestamps.clear();
+                        }
+                    }
+                });
 
                 ui.separator();
                 ui.spacing_mut().item_spacing.y = 2.0;
 
                 let mut delete_room_id: Option<String> = None;
-                egui::ScrollArea::vertical().show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .max_height(rooms_list_height)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
                     for room in &self.rooms {
                         let selected = self.selected_room.as_ref() == Some(&room.id);
                         ui.horizontal(|ui| {

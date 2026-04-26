@@ -1,1 +1,1 @@
-Here come the tests for Rocket
+Here come the tests for ARPSCI API, and the Rocket server, ongoing.
