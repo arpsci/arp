@@ -1,55 +1,57 @@
 # Runs and Audit Trail
 
-ARP stores each execution as a run bundle under `runs/<experiment_id>/<run_id>/`.
+ARP stores each execution under `runs/<experiment_id>/<run_id>/`.
 
 ## Run manifest
 
-`manifest.json` captures runtime options and graph snapshot.
+`manifest.json` is the primary description of a run. It includes:
 
-```rust
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct RunManifest {
-    pub manifest_version: String,
-    pub app_name: String,
-    pub app_version: String,
-    pub created_at: String,
-    pub experiment_id: String,
-    pub run_id: String,
-    pub graph_signature: String,
-    pub runtime: RunRuntimeSettings,
-    pub graph: GraphSnapshot,
-}
-```
+- manifest and app version metadata,
+- generated `experiment_id` and `run_id`,
+- a graph signature derived from canonical runtime and graph data,
+- runtime settings such as Ollama host/model, HTTP endpoint, history size, replay mode, HTTP policy flags, and metrics config,
+- a graph snapshot containing one record per node row, including serialized node config.
+
+The current manifest version is `2.0.0`.
 
 ## Event ledger
 
-`events.jsonl` is append-only and hash-aware. Every event stores input and output hashes plus payload.
+Every run can also have an append-only `events.jsonl` ledger. The ledger is opened when a run starts and writes monotonically increasing `event_id` values. Each envelope stores:
 
-```rust
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EventEnvelope {
-    pub experiment_id: String,
-    pub run_id: String,
-    pub event_id: u64,
-    pub event_type: String,
-    pub timestamp: String,
-    pub input_hash: String,
-    pub output_hash: String,
-    pub payload: serde_json::Value,
-}
-```
+- run identity,
+- event type and timestamp,
+- optional node-global-id and model,
+- SHA-256 hashes of the logical input and output,
+- a JSON payload.
 
-On finalization, a `summary.json` file is generated with:
+Common event families in the current code include:
 
-- Event counters by type.
-- HTTP transport success and failure counts.
-- SHA-256 of `manifest.json` and `events.jsonl` when present.
+- `system.run_started`
+- `system.run_stopped`
+- `dialogue.start`
+- `dialogue.turn`
+- `transport.http`
+- `transport.http_blocked`
+- `python_task.started`
+- `python_task.finished`
+
+When a run is finalized, `summary.json` is written next to the ledger. It records event counts, total events, transport success/failure counters, first and last timestamps, and SHA-256 digests for `manifest.json` and `events.jsonl` when those files exist.
+
+## Metrics alongside audit data
+
+Timing metrics are not stored in the run bundle by default. They are written through the metrics sink to `metrics/timings.jsonl` unless the user changes that path in Settings.
+
+That JSONL contains two event families:
+
+- `inference_timing` for Ollama requests, including TTFT and token counts when available,
+- `turn_timing` for dialogue gaps and speaker/receiver sequencing.
 
 ## Overview chat persistence
 
-The Overview tab stores conversations in SQLite through `Store` (`src/ui/overview_chat/store.rs`) and writes audit records through `AuditHandle` (`src/ui/overview_chat/audit.rs`).
+The Overview chat remains a separate persistence path from the run ledger.
 
-This provides two persistence layers:
+- the chat UI stores room/message history through the Overview chat store,
+- the audit module keeps append-only chat audit output for that subsystem,
+- active conversation runs can mirror agent messages into the currently active room over the in-process channel bridge.
 
-1. Structured room and message history for UI replay.
-2. Append-only audit lines for external review.
+In short: the run ledger is the reproducibility trail for orchestration, while Overview chat persistence is the UI-facing conversational record.

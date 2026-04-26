@@ -4,30 +4,48 @@
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `OLLAMA_HOST` | `http://127.0.0.1:11434` | Base URL for Ollama API |
-| `OLLAMA_MODEL` | empty | Selected model override |
-| `AMS_OLLAMA_CONTEXT_WINDOW` | unset | Optional context window (`num_ctx`) |
-| `AMS_WEB_ENABLED` | `false` | Enables embedded Rocket server |
-| `AMS_WEBHOOKS_ENABLED` | `false` | Enables outbound webhook POSTs (independent of Rocket) |
-| `AMS_WEB_ADDRESS` | `127.0.0.1` | Bind address for embedded server |
-| `AMS_WEB_PORT` | `8000` | Bind port for embedded server |
-| `AMS_CONVERSATION_HTTP_STREAM_ENABLED` | `false` | Enables conversation start/turn/end HTTP streaming |
-| `AMS_CHAT_STREAM_ENABLED` | `true` | Enables forwarding turn-by-turn messages into Overview chat |
-| `AMS_AIR_GAP` | `false` | Blocks non-loopback outbound HTTP |
-| `AMS_ALLOW_LOCAL_OLLAMA` | `true` | Allows loopback Ollama in air-gap mode |
-| `CONVERSATION_HTTP_ENDPOINT` | `http://localhost:3000/` | Webhook endpoint for conversation events |
-| `AMS_LOG_PLAY_PLAN` | `false` | Logs resolved play plan before run |
-| `AMS_CONVERSATION_GROUP_SIZE` | `2` | Number of workers per conversation loop |
-| `AMS_METRICS_FILE` | `metrics/timings.jsonl` | Metrics JSONL output path |
-| `AMS_MASTER_HASH` | unset | Master password Argon2id PHC hash |
-| `AMS_ARGON2_M_KIB` | `65536` | Vault Argon2 memory cost |
+| `OLLAMA_HOST` | `http://127.0.0.1:11434` | Base host used for Ollama inference and, unless overridden, model-tag lookup |
+| `OLLAMA_MODEL` | unset in UI state; inference fallback `glm-4.7-flash:latest` | Default model used when no per-call override is provided |
+| `OLLAMA_TAGS_URL` | derived from `OLLAMA_HOST + /api/tags` | Optional override for model-list discovery |
+| `AMS_OLLAMA_CONTEXT_WINDOW` | unset | Optional Ollama `num_ctx` value passed with inference requests |
+| `AMS_WEB_ENABLED` | `false` | Enables the embedded Rocket server |
+| `AMS_WEBHOOKS_ENABLED` | `false` | Enables outbound webhook POSTs for conversation, evaluator, and researcher events |
+| `AMS_WEB_ADDRESS` | `127.0.0.1` | Bind address for the embedded server |
+| `AMS_WEB_PORT` | `8000` | Bind port for the embedded server |
+| `AMS_CONVERSATION_HTTP_STREAM_ENABLED` | `false` | Sends conversation start and turn messages to the configured HTTP endpoint |
+| `AMS_CHAT_STREAM_ENABLED` | `true` | Forwards run messages into the active Overview chat room |
+| `AMS_AIR_GAP` | `false` | Blocks non-loopback outbound HTTP through the app policy layer |
+| `AMS_ALLOW_LOCAL_OLLAMA` | `true` | Allows loopback Ollama access when air-gap mode is enabled |
+| `CONVERSATION_HTTP_ENDPOINT` | `http://localhost:3000/` | Webhook endpoint used by conversation and sidecar streaming |
+| `AMS_LOG_PLAY_PLAN` | `false` | Logs the resolved conversation play plan before execution |
+| `AMS_CONVERSATION_GROUP_SIZE` | `2` | Conversation group size used when partitioning eligible workers |
+| `AMS_RESEARCH_POLICY` | `inline` | Researcher scheduling policy: `off`, `inline`, or `background` |
+| `AMS_EVALUATOR_POLICY` | `inline` | Evaluator scheduling policy: `off`, `inline`, or `batched:N` |
+| `AMS_METRICS_FILE` | `metrics/timings.jsonl` | Path used by the metrics JSONL sink |
+| `AMS_MASTER_HASH` | unset | Argon2id PHC hash accepted by the vault unlock gate |
+| `AMS_ARGON2_M_KIB` | `65536` | Vault Argon2 memory cost in KiB |
 | `AMS_ARGON2_T` | `3` | Vault Argon2 time cost |
-| `AMS_ARGON2_P` | auto (`1..4`) | Vault Argon2 parallelism |
-| `AMS_SKIP_VAULT` | `false` | Disables vault gate in development |
+| `AMS_ARGON2_P` | auto-clamped to `1..4` | Vault Argon2 parallelism |
+| `AMS_SKIP_VAULT` | disabled unless exactly `1` | Bypasses the vault gate for development |
 
-## Notes
+## Runtime defaults not driven by env
 
-- Metrics recording is enabled by default.
-- Disabling the vault is intended only for local development.
-- Air-gap mode and local Ollama allowance are independent toggles.
-- `AMS_WEB_ENABLED` starts Rocket only; it no longer enables outbound conversation webhooks.
+Some important behavior is configured in code or through the UI instead of environment variables:
+
+- dialogue history size defaults to `5` and is changed from the Settings panel,
+- metrics capture starts enabled by default and can be disabled from Settings,
+- the app window starts at `900x840`,
+- the Catppuccin Latte theme is applied automatically on first frame.
+
+## Boolean parsing notes
+
+Most app booleans use the shared parser that accepts `1`, `true`, `yes`, and `on` as true, plus `0`, `false`, `no`, and `off` as false.
+
+`AMS_SKIP_VAULT` is the exception: the current vault code enables skip mode only when the variable is exactly `1`.
+
+## Operational notes
+
+- `AMS_WEB_ENABLED` and `AMS_WEBHOOKS_ENABLED` are independent.
+- air-gap mode affects outbound HTTP guards, not whether the embedded Rocket server can bind locally.
+- `AMS_CONVERSATION_HTTP_STREAM_ENABLED` only has an effect when outbound webhooks are also enabled.
+- changing metrics settings in the UI rebuilds the active metrics sink at runtime.

@@ -1,12 +1,13 @@
-# ARPSCI Dashboard Docs
+# ARP Docs
 
-This folder contains project documentation for the ARPSCI project.
+This folder contains the project documentation used by both the mdBook site and the crate-level docs include.
 
 ## What Is Here
 
-- Narrative docs in Markdown for contributors and operators.
-- mdBook scaffold for publishing these docs as a static site.
-- Content reused by Rust API docs (`cargo doc`) via crate-level include.
+- narrative docs for contributors and operators,
+- the mdBook scaffold under `docs/`,
+- generated static output under `docs/book/` after a build,
+- source content that is reused by `cargo doc` through `src/lib.rs`.
 
 ## Build Code
 
@@ -20,23 +21,23 @@ cargo build
 cargo doc --no-deps
 ```
 
-Generated docs are placed in `target/doc/`.
+Generated API docs are written to `target/doc/`.
 
-## Build Book Docs (mdBook)
+## Build Book Docs
 
-Install mdBook once:
+Install mdBook once if needed:
 
 ```sh
 cargo install mdbook
 ```
 
-Build the docs site:
+Build the book:
 
 ```sh
 mdbook build docs
 ```
 
-Serve locally:
+Serve it locally:
 
 ```sh
 mdbook serve docs -n 127.0.0.1 -p 3001

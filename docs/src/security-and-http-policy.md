@@ -2,39 +2,61 @@
 
 ## Vault gate
 
-The application starts behind a master-password gate unless `AMS_SKIP_VAULT=1` is set for development.
+The desktop app starts behind `MasterVault` unless vault skipping is explicitly enabled for development.
 
-`MasterVault` verifies an Argon2id PHC hash from:
+The unlock gate accepts a PHC-format Argon2id hash from either:
 
 - `AMS_MASTER_HASH`, or
-- `runs/.master_hash`
+- the first line of `runs/.master_hash`.
 
-The internal `Vault` type encrypts in-memory blobs using:
+Important current behavior:
 
-- Argon2id key material
-- HKDF-SHA256 key expansion
-- ChaCha20-Poly1305 AEAD
+- `AMS_SKIP_VAULT` is treated as enabled only when it equals `1`.
+- if no stored hash is configured, the unlock UI stays on screen and tells the operator how to provide one.
+- the UI adds a top lock bar after unlock so the workspace can be re-locked without restarting the app.
 
-```rust
-let key_material = derive_vault_key(master_password, params, &salt)?;
-let cipher = ChaCha20Poly1305::new(Key::from_slice(&key_material));
-let ciphertext = cipher.encrypt(nonce_ref, Payload { msg: plaintext, aad: VAULT_AAD })?;
-```
+## Encrypted in-memory vault blob
 
-## Air-gap policy
+The internal `Vault` type is a small encrypted blob container, not a general persistence layer. It derives encryption material from the master password using:
 
-HTTP safety is enforced by `HttpPolicy`.
+- Argon2id,
+- HKDF-SHA256 expansion,
+- ChaCha20-Poly1305 for authenticated encryption.
 
-```rust
-pub struct HttpPolicy {
-    pub air_gap_enabled: bool,
-    pub allow_local_ollama: bool,
-}
-```
+Argon2 parameters are configurable through `AMS_ARGON2_M_KIB`, `AMS_ARGON2_T`, and `AMS_ARGON2_P`.
 
-When `AMS_AIR_GAP=1`:
+## Outbound HTTP policy
 
-- non-loopback outbound requests are blocked,
-- Ollama is allowed only if host is loopback and `AMS_ALLOW_LOCAL_OLLAMA=1`.
+Outbound HTTP is guarded by `HttpPolicy` in `src/web/mod.rs`. The policy has two flags:
 
-Blocked requests are recorded as transport events in the active run ledger.
+- `air_gap_enabled`
+- `allow_local_ollama`
+
+When air-gap mode is disabled, outbound webhook traffic is allowed normally.
+
+When air-gap mode is enabled:
+
+- generic outbound HTTP is allowed only to loopback hosts,
+- Ollama requests are allowed only when `allow_local_ollama` is also enabled and the Ollama host resolves to loopback,
+- blocked attempts are written to the run ledger as `transport.http_blocked`.
+
+The loopback check currently treats `localhost` and loopback IP literals as local.
+
+## Embedded server and webhook separation
+
+The current code keeps inbound and outbound web features separate.
+
+- `AMS_WEB_ENABLED` controls the embedded Rocket server.
+- `AMS_WEBHOOKS_ENABLED` controls outbound webhook POSTs.
+
+Enabling Rocket does not automatically enable outbound posts, and disabling webhooks does not disable the local API.
+
+## Embedded API surface
+
+When enabled, Rocket mounts three routes under `/api`:
+
+- `/health`
+- `/outgoing-http-log`
+- `/outgoing-http-log/live`
+
+The log endpoints expose the in-memory outgoing HTTP log used for operator visibility. They do not replace the run ledger; they complement it with a live view.

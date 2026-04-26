@@ -2,59 +2,37 @@
 
 ## Startup path
 
-The binary initializes Tokio, optionally starts the embedded web server, then launches the egui app.
+The binary startup is still compact, but there are a few important details worth keeping in mind:
 
-```rust
-fn main() -> eframe::Result<()> {
-    let rt = Arc::new(Runtime::new().expect("Failed to create Tokio runtime"));
-    let rt_handle = rt.handle().clone();
+1. Create a multi-threaded Tokio runtime.
+2. Keep that runtime alive on a background thread.
+3. Optionally launch the embedded Rocket server when `AMS_WEB_ENABLED` is enabled.
+4. Start the egui native app with a `900x840` initial viewport and the window title `arp-cogsci`.
 
-    std::thread::spawn(move || {
-        rt.block_on(async {
-            loop {
-                tokio::time::sleep(tokio::time::Duration::from_secs(3600)).await;
-            }
-        });
-    });
-
-    if web::start_embedded_server_if_enabled(&rt_handle) {
-        eprintln!("Embedded Rocket server enabled (AMS_WEB_ENABLED=true)");
-    }
-
-    eframe::run_native(
-        "arp-cogsci",
-        eframe::NativeOptions::default(),
-        Box::new(move |_cc| Ok(Box::new(AMSAgentsApp::new(rt_handle.clone())))),
-    )
-}
-```
+The UI shell receives only the Tokio handle; everything else is built inside `AMSAgentsApp::new`.
 
 ## Frame loop responsibilities
 
-`AMSAgentsApp` performs three key tasks on each frame:
+`AMSAgentsApp` owns three kinds of work on each frame:
 
-1. Prepare visual shell (theme and fonts).
-2. Enforce vault unlock before rendering the workspace.
-3. Render the nodes panel and feature tabs.
+1. Apply shell presentation once.
+   Today that means the Catppuccin Latte theme plus the Phosphor icon font.
+2. Enforce the vault gate.
+   If the app is locked, the frame renders only the unlock screen and returns early.
+3. Render the live workspace.
+   Once unlocked, the app shows a top lock bar, refreshes Ollama models on first use, and delegates the main body to the graph workspace renderer.
 
-```rust
-impl eframe::App for AMSAgentsApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        prepare_shell(ctx, &mut self.theme_applied, &mut self.phosphor_fonts_installed);
+The app-level UI state is also kept here. It includes:
 
-        if !self.vault.is_unlocked() {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                self.vault.show_unlock_ui(ui);
-            });
-            return;
-        }
+- Ollama model list and test status,
+- the manifest export path field,
+- the Python panel form state and background-operation results.
 
-        refresh_ollama_models_on_startup(&self.ams_agents, &mut self.ui_state, ctx);
-        egui::CentralPanel::default().show(ctx, |ui| {
-            self.ams_agents.render_nodes_panel(ui, &mut self.ui_state);
-        });
-    }
-}
-```
+## UI ownership model
 
-The UI is intentionally thin: orchestration and business logic live in `AMSAgents` and related modules.
+The shell is intentionally thin.
+
+- `AMSAgentsApp` handles frame lifecycle, unlock/lock behavior, and one-time shell setup.
+- `AMSAgents` renders the actual workspace and owns behavior such as run control, model settings, metrics settings, HTTP policy toggles, Python runtime actions, and Overview chat forwarding.
+
+That boundary matters when changing the UI: if a feature needs to survive across async tasks or active runs, it usually belongs in `AMSAgents`, not in the ephemeral frame-local widget code.
